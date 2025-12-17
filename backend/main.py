@@ -49,9 +49,9 @@ def setup_ffmpeg_path():
 FFMPEG_PATH = setup_ffmpeg_path()
 
 # Load Whisper model once at startup
-print("Loading Whisper Large model for reliable performance...")
-model = whisper.load_model("large")  # Most stable model
-print("Whisper Large model loaded successfully!")
+print("Loading Whisper base model...")
+model = whisper.load_model("base")  # Smaller, faster model for development
+print("Whisper model loaded successfully!")
 
 def extract_youtube_video_id(url):
     """Extract YouTube video ID from various YouTube URL formats."""
