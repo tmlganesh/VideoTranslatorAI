@@ -5,3 +5,4 @@ openai-whisper
 pydantic
 python-multipart
 youtube-transcript-api
+jiwer
