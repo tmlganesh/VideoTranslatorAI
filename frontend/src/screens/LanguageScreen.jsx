@@ -77,7 +77,7 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
   return (
     <div style={screenStyle}>
       <div style={containerStyle}>
-        <button 
+        <button
           onClick={onPrev}
           style={{
             background: 'none',
@@ -109,7 +109,7 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
           <label style={labelStyle}>
             Source Language
           </label>
-          <select 
+          <select
             style={selectStyle}
             value={sourceLanguage}
             onChange={(e) => setSourceLanguage(e.target.value)}
@@ -134,7 +134,7 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
           <label style={labelStyle}>
             Target Language
           </label>
-          <select 
+          <select
             style={selectStyle}
             value={targetLanguage}
             onChange={(e) => setTargetLanguage(e.target.value)}
@@ -155,9 +155,9 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
           </select>
         </div>
 
-        <button 
+        <button
           style={buttonStyle}
-          onClick={() => onStartTranscription(targetLanguage)}
+          onClick={() => onStartTranscription(targetLanguage, sourceLanguage)}
           onMouseOver={(e) => e.target.style.background = '#2563eb'}
           onMouseOut={(e) => e.target.style.background = '#3b82f6'}
         >

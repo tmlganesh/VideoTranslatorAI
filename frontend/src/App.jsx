@@ -9,18 +9,18 @@ import ResultsScreen from './screens/ResultsScreen';
 function App() {
   // Step navigation
   const [currentStep, setCurrentStep] = useState(1);
-  
+
   // Form data
   const [uploadMethod, setUploadMethod] = useState('url'); // 'url' or 'file'
   const [videoUrl, setVideoUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
-  
+
   // Results
   const [transcriptionResult, setTranscriptionResult] = useState(null);
   const [translationResult, setTranslationResult] = useState(null);
   const [detectedLanguage, setDetectedLanguage] = useState(null);
   const [targetLanguageUsed, setTargetLanguageUsed] = useState(null);
-  
+
   // UI state
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -52,14 +52,14 @@ function App() {
   };
 
   // Transcription function
-  const handleStartTranscription = async (targetLanguage = null) => {
+  const handleStartTranscription = async (targetLanguage = null, sourceLanguage = 'Auto-detect') => {
     setCurrentStep(4); // Move to processing screen
     setLoading(true);
     setError(null);
 
     try {
       let response;
-      
+
       if (uploadMethod === 'url') {
         // Transcribe from URL
         response = await fetch('http://localhost:8000/api/transcribe/', {
@@ -69,14 +69,15 @@ function App() {
           },
           body: JSON.stringify({
             video_url: videoUrl,
-            target_language: targetLanguage && targetLanguage !== 'Same as Original (No Translation)' ? targetLanguage : null
+            target_language: targetLanguage && targetLanguage !== 'Same as Original (No Translation)' ? targetLanguage : null,
+            source_language: sourceLanguage && sourceLanguage !== 'Auto-detect' ? sourceLanguage : null
           }),
         });
       } else {
         // Transcribe uploaded file
         const formData = new FormData();
         formData.append('file', selectedFile);
-        
+
         response = await fetch('http://localhost:8000/api/transcribe-file/', {
           method: 'POST',
           body: formData,
@@ -85,8 +86,8 @@ function App() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        const errorMessage = typeof errorData === 'object' ? 
-          (errorData.detail || JSON.stringify(errorData) || 'Failed to transcribe') : 
+        const errorMessage = typeof errorData === 'object' ?
+          (errorData.detail || JSON.stringify(errorData) || 'Failed to transcribe') :
           errorData;
         throw new Error(errorMessage);
       }
@@ -97,7 +98,7 @@ function App() {
       console.log('Translation field:', data.translation);
       console.log('Target language field:', data.target_language);
       console.log('====================');
-      
+
       setTranscriptionResult(data.transcription);
       setTranslationResult(data.translation);
       setTargetLanguageUsed(data.target_language);
@@ -105,7 +106,7 @@ function App() {
         name: data.detected_language,
         code: data.language_code
       });
-      
+
       setCurrentStep(5); // Move to results screen
     } catch (err) {
       setError(err.message);
@@ -125,7 +126,7 @@ function App() {
     switch (currentStep) {
       case 1:
         return <LandingScreen onNext={nextStep} />;
-      
+
       case 2:
         return (
           <UploadScreen
@@ -139,7 +140,7 @@ function App() {
             onPrev={prevStep}
           />
         );
-      
+
       case 3:
         return (
           <LanguageScreen
@@ -148,7 +149,7 @@ function App() {
             onStartTranscription={handleStartTranscription}
           />
         );
-      
+
       case 4:
         return (
           <ProcessingScreen
@@ -156,7 +157,7 @@ function App() {
             onRetry={handleRetry}
           />
         );
-      
+
       case 5:
         return (
           <ResultsScreen
@@ -167,7 +168,7 @@ function App() {
             onNewTranscription={startOver}
           />
         );
-      
+
       default:
         return <LandingScreen onNext={nextStep} />;
     }
