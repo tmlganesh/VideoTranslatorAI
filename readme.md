@@ -1,11 +1,28 @@
 # Video Transcription Pipeline
 
-A complete full-stack application for video transcription using FastAPI backend and React frontend. This application can transcribe audio from video URLs (YouTube, etc.) using AI-powered speech recognition.
+A complete full-stack application for video transcription using FastAPI backend and React frontend. This application can transcribe audio from video URLs (YouTube, etc.) using AI-powered speech recognition and translate to multiple languages.
+
+## ✨ NEW: Text Accuracy Calculator
+
+This project now includes a **Text Accuracy Checker** that calculates how accurate your transcription is! 
+
+📊 **Features**:
+- Upload original text files or paste from clipboard
+- Compare against generated transcription
+- Get detailed accuracy metrics (character-level and word-level analysis)
+- Beautiful color-coded results display
+- Quality level assessment (Excellent/Very Good/Good/Fair/Poor)
+
+📚 **Documentation**: See [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md) for complete guides and examples.
+
+---
 
 ## Features
 
 - **Video URL Input**: Support for various video platforms (YouTube, etc.)
 - **AI Transcription**: Uses OpenAI's Whisper model for accurate speech-to-text
+- **Translation**: Multi-language translation support
+- **Text Accuracy Analysis**: NEW - Compare transcriptions with original text
 - **Modern UI**: Clean, responsive React interface
 - **Real-time Progress**: Loading indicators and error handling
 - **Copy to Clipboard**: Easy text copying functionality

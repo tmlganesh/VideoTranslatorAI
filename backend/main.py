@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import yt_dlp
 import whisper
 import os
@@ -64,10 +65,10 @@ def extract_youtube_video_id(url):
     match = youtube_regex.search(url)
     return match.group(1) if match else None
 
-def get_youtube_transcript(video_id, target_languages=['te', 'hi', 'en', 'auto']):
+def get_youtube_transcript(video_id, source_language=None):
     """
     Try to fetch YouTube transcript using YouTube Transcript API.
-    Prioritizes Telugu, then Hindi, then English for better regional language support.
+    Prioritizes the original language (auto-generated) first, then manual transcripts.
     Returns tuple: (transcript_text, detected_language_code, detected_language_name)
     """
     try:
@@ -87,35 +88,53 @@ def get_youtube_transcript(video_id, target_languages=['te', 'hi', 'en', 'auto']
             'no': 'Norwegian', 'or': 'Odia', 'as': 'Assamese', 'ne': 'Nepali', 'si': 'Sinhala'
         }
         
-        # Try to find transcript in preferred languages (Telugu prioritized)
         transcript = None
         selected_lang = None
         
-        # First, try to find manually created transcripts
-        for lang in target_languages:
+        # If user specified a source language, try that first
+        if source_language and source_language != 'Auto-detect':
+            lang_code_map = {
+                'English': 'en', 'Hindi': 'hi', 'Telugu': 'te', 'Tamil': 'ta',
+                'Kannada': 'kn', 'Malayalam': 'ml', 'Bengali': 'bn', 'Gujarati': 'gu',
+                'Marathi': 'mr', 'Spanish': 'es', 'French': 'fr', 'German': 'de'
+            }
+            preferred_lang = lang_code_map.get(source_language, source_language.lower()[:2])
             try:
-                if lang == 'auto':
-                    # Try to get the first available manually created transcript
-                    for t in transcript_list:
-                        if not t.is_generated:
-                            transcript = t.fetch()
-                            selected_lang = t.language_code
-                            break
-                else:
-                    transcript = transcript_list.find_transcript([lang]).fetch()
-                    selected_lang = lang
-                    break
+                transcript = transcript_list.find_transcript([preferred_lang]).fetch()
+                selected_lang = preferred_lang
+                print(f"Found transcript in user-specified language: {source_language}")
             except:
-                continue
+                print(f"No transcript found for specified language: {source_language}")
         
-        # If no manual transcript found, try auto-generated
+        # Priority 1: Get auto-generated transcript (original language of the video)
         if not transcript:
             try:
-                # Get auto-generated transcript (usually in the video's original language)
                 for t in transcript_list:
                     if t.is_generated:
                         transcript = t.fetch()
                         selected_lang = t.language_code
+                        print(f"Found auto-generated transcript in original language: {selected_lang}")
+                        break
+            except Exception as e:
+                print(f"No auto-generated transcript: {e}")
+        
+        # Priority 2: Try English manual transcript (common for TED talks)
+        if not transcript:
+            try:
+                transcript = transcript_list.find_transcript(['en']).fetch()
+                selected_lang = 'en'
+                print(f"Found English transcript")
+            except:
+                pass
+        
+        # Priority 3: Try any available manual transcript
+        if not transcript:
+            try:
+                for t in transcript_list:
+                    if not t.is_generated:
+                        transcript = t.fetch()
+                        selected_lang = t.language_code
+                        print(f"Found manual transcript in: {selected_lang}")
                         break
             except:
                 pass
@@ -183,20 +202,23 @@ async def translate_with_sarvam_ai(text: str, source_language: str, target_langu
     if not SARVAM_API_KEY:
         raise HTTPException(status_code=500, detail="Sarvam AI API key not configured")
     
-    # Language code mapping for Sarvam AI
+    # Language code mapping for Sarvam AI (all 13 supported languages)
+    # Sarvam AI uses ISO language codes with -IN suffix
     sarvam_language_map = {
-        'en': 'en-IN',
-        'hi': 'hi-IN', 
-        'te': 'te-IN',
-        'ta': 'ta-IN',
-        'kn': 'kn-IN',
-        'ml': 'ml-IN',
-        'gu': 'gu-IN',
-        'mr': 'mr-IN',
-        'bn': 'bn-IN',
-        'or': 'or-IN',
-        'pa': 'pa-IN',
-        'as': 'as-IN'
+        'en': 'en-IN',      # English
+        'hi': 'hi-IN',      # Hindi
+        'te': 'te-IN',      # Telugu
+        'ta': 'ta-IN',      # Tamil
+        'kn': 'kn-IN',      # Kannada
+        'ml': 'ml-IN',      # Malayalam
+        'gu': 'gu-IN',      # Gujarati
+        'mr': 'mr-IN',      # Marathi
+        'bn': 'bn-IN',      # Bengali
+        'od': 'od-IN',      # Odia (Sarvam uses 'od')
+        'or': 'od-IN',      # Odia (alternate code mapping)
+        'pa': 'pa-IN',      # Punjabi
+        'as': 'as-IN',      # Assamese
+        'ne': 'ne-IN',      # Nepali (13th language)
     }
     
     # Map to Sarvam AI language codes
@@ -219,17 +241,28 @@ async def translate_with_sarvam_ai(text: str, source_language: str, target_langu
     if len(text) <= max_chunk_size:
         text_chunks = [text]
     else:
-        # Split by sentences first to maintain context
-        sentences = text.split('. ')
+        # Split by common sentence separators (handles Hindi | and English .)
+        import re
+        # Split on | or . followed by space, keeping the separator
+        sentences = re.split(r'(?<=[|।.!?\n])\s*', text)
         current_chunk = ""
         
         for sentence in sentences:
-            if len(current_chunk + sentence + '. ') <= max_chunk_size:
-                current_chunk += sentence + '. '
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
+                current_chunk += sentence + " "
             else:
                 if current_chunk:
                     text_chunks.append(current_chunk.strip())
-                current_chunk = sentence + '. '
+                # If single sentence is too long, force split it
+                if len(sentence) > max_chunk_size:
+                    for i in range(0, len(sentence), max_chunk_size):
+                        text_chunks.append(sentence[i:i+max_chunk_size])
+                    current_chunk = ""
+                else:
+                    current_chunk = sentence + " "
         
         if current_chunk:
             text_chunks.append(current_chunk.strip())
@@ -349,7 +382,8 @@ app.add_middleware(
 
 class TranscriptionRequest(BaseModel):
     video_url: str
-    target_language: str = None  # Optional translation target language
+    target_language: Optional[str] = None  # Optional translation target language
+    source_language: Optional[str] = None  # Optional source language hint
 
 class TranscriptionResponse(BaseModel):
     transcription: str
@@ -385,7 +419,7 @@ async def transcribe_video(request: TranscriptionRequest):
         print(f"=== TRANSCRIPTION REQUEST DEBUG ===")
         print(f"Video URL: {request.video_url}")
         print(f"Target Language: {request.target_language}")
-        print(f"Target Language Type: {type(request.target_language)}")
+        print(f"Source Language: {request.source_language}")
         print(f"===================================")
         
         # Check if it's a YouTube URL and try to get existing transcript first
@@ -393,7 +427,7 @@ async def transcribe_video(request: TranscriptionRequest):
         
         if video_id:
             print(f"YouTube video detected (ID: {video_id}). Trying to fetch existing transcript...")
-            transcript_text, lang_code, lang_name = get_youtube_transcript(video_id)
+            transcript_text, lang_code, lang_name = get_youtube_transcript(video_id, request.source_language)
             
             if transcript_text:
                 print("Successfully retrieved YouTube transcript! Skipping audio processing.")
@@ -403,24 +437,39 @@ async def transcribe_video(request: TranscriptionRequest):
                 target_lang = None
                 print(f"=== TRANSLATION ATTEMPT DEBUG ===")
                 print(f"Request target language: '{request.target_language}'")
-                print(f"Condition check: {request.target_language and request.target_language != 'Same as Original (No Translation)'}")
+                print(f"Source language detected: '{lang_code}'")
                 print(f"=================================")
                 
-                if request.target_language and request.target_language != "Same as Original (No Translation)":
+                # Determine if translation is needed
+                # Auto-translate to English if source is non-English and no target specified
+                effective_target = request.target_language
+                if (not effective_target or effective_target == "Same as Original (No Translation)") and lang_code != 'en':
+                    effective_target = 'en'  # Auto-translate non-English to English
+                    print(f"Auto-translating from {lang_code} to English (no target specified)")
+                
+                if effective_target and effective_target != "Same as Original (No Translation)" and effective_target != lang_code:
                     try:
-                        print(f"Starting translation from {lang_code} to {request.target_language}")
+                        print(f"Starting translation from {lang_code} to {effective_target}")
                         print(f"Transcript text (first 200 chars): {transcript_text[:200]}...")
                         translation_text = await translate_with_sarvam_ai(
                             text=transcript_text,
                             source_language=lang_code,
-                            target_language=request.target_language
+                            target_language=effective_target
                         )
                         print(f"Translation result (first 200 chars): {translation_text[:200]}...")
-                        target_lang = request.target_language
+                        target_lang = effective_target
                         print(f"Translation completed for YouTube transcript")
                     except Exception as e:
                         print(f"Translation failed for YouTube transcript: {str(e)}")
-                        # Continue without translation rather than failing
+                        # Return error status instead of silently failing
+                        return TranscriptionResponse(
+                            transcription=transcript_text,
+                            detected_language=lang_name,
+                            language_code=lang_code,
+                            status=f"error_translation_failed: {str(e)}",
+                            translation="",
+                            target_language=""
+                        )
                 
                 return TranscriptionResponse(
                     transcription=transcript_text,
@@ -513,18 +562,35 @@ async def transcribe_video(request: TranscriptionRequest):
         # Handle translation if requested
         translation_text = None
         target_lang = None
-        if request.target_language and request.target_language != "Same as Original (No Translation)":
+        
+        # Determine if translation is needed
+        # Auto-translate to English if source is non-English and no target specified
+        effective_target = request.target_language
+        if (not effective_target or effective_target == "Same as Original (No Translation)") and detected_language_code != 'en':
+            effective_target = 'en'  # Auto-translate non-English to English
+            print(f"Auto-translating from {detected_language_code} to English (no target specified)")
+        
+        if effective_target and effective_target != "Same as Original (No Translation)" and effective_target != detected_language_code:
             try:
                 translation_text = await translate_with_sarvam_ai(
                     text=transcription_text,
                     source_language=detected_language_code,
-                    target_language=request.target_language
+                    target_language=effective_target
                 )
-                target_lang = request.target_language
+                target_lang = effective_target
                 print(f"Translation completed for video transcription")
             except Exception as e:
                 print(f"Translation failed for video transcription: {str(e)}")
-                # Continue without translation rather than failing
+                # Clean up and return error status
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return TranscriptionResponse(
+                    transcription=transcription_text,
+                    detected_language=detected_language_name,
+                    language_code=detected_language_code,
+                    status=f"error_translation_failed: {str(e)}",
+                    translation="",
+                    target_language=""
+                )
         
         # Clean up temporary directory
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -665,6 +731,142 @@ async def translate_text(request: TranslationRequest):
     except Exception as e:
         print(f"Error during translation: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+
+# Accuracy Evaluation Models
+class AccuracyRequest(BaseModel):
+    reference_text: str
+    predicted_text: str
+    mode: Optional[str] = "transcription"  # "transcription" or "translation"
+
+class AccuracyResponse(BaseModel):
+    overall_accuracy: float
+    wer: float
+    wer_percentage: float
+    character_accuracy: float
+    word_accuracy: float
+    quality_level: str
+    reference_word_count: int
+    predicted_word_count: int
+
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate Levenshtein distance between two strings."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def calculate_accuracy_metrics(reference: str, predicted: str):
+    """Calculate various accuracy metrics between reference and predicted text."""
+    # Normalize texts
+    ref_normalized = ' '.join(reference.lower().split())
+    pred_normalized = ' '.join(predicted.lower().split())
+    
+    # Character-level Levenshtein similarity
+    char_distance = levenshtein_distance(ref_normalized, pred_normalized)
+    max_len = max(len(ref_normalized), len(pred_normalized))
+    character_accuracy = ((max_len - char_distance) / max_len * 100) if max_len > 0 else 100.0
+    
+    # Word-level metrics
+    ref_words = ref_normalized.split()
+    pred_words = pred_normalized.split()
+    
+    ref_word_count = len(ref_words)
+    pred_word_count = len(pred_words)
+    
+    # Word Error Rate (WER)
+    if ref_word_count == 0:
+        wer = 0.0 if pred_word_count == 0 else 1.0
+    else:
+        # DP for word-level edit distance
+        n, m = ref_word_count, pred_word_count
+        dp = [[0] * (m + 1) for _ in range(n + 1)]
+        
+        for i in range(n + 1):
+            dp[i][0] = i
+        for j in range(m + 1):
+            dp[0][j] = j
+        
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                cost = 0 if ref_words[i-1] == pred_words[j-1] else 1
+                dp[i][j] = min(
+                    dp[i-1][j] + 1,      # deletion
+                    dp[i][j-1] + 1,      # insertion
+                    dp[i-1][j-1] + cost  # substitution
+                )
+        
+        word_edit_distance = dp[n][m]
+        wer = word_edit_distance / ref_word_count
+    
+    wer_percentage = min(100.0, wer * 100)
+    word_accuracy = max(0.0, 100.0 - wer_percentage)
+    
+    # Overall accuracy (weighted average favoring character accuracy)
+    overall_accuracy = (character_accuracy * 0.6 + word_accuracy * 0.4)
+    
+    # Quality level assessment
+    if overall_accuracy >= 95:
+        quality_level = "Excellent"
+    elif overall_accuracy >= 85:
+        quality_level = "Very Good"
+    elif overall_accuracy >= 75:
+        quality_level = "Good"
+    elif overall_accuracy >= 60:
+        quality_level = "Fair"
+    else:
+        quality_level = "Poor"
+    
+    return {
+        "overall_accuracy": round(overall_accuracy, 2),
+        "wer": round(wer, 4),
+        "wer_percentage": round(wer_percentage, 2),
+        "character_accuracy": round(character_accuracy, 2),
+        "word_accuracy": round(word_accuracy, 2),
+        "quality_level": quality_level,
+        "reference_word_count": ref_word_count,
+        "predicted_word_count": pred_word_count
+    }
+
+
+@app.post("/api/evaluate-accuracy/", response_model=AccuracyResponse)
+async def evaluate_accuracy(request: AccuracyRequest):
+    """
+    Evaluate accuracy between reference and predicted text.
+    Supports both transcription and translation accuracy evaluation.
+    """
+    try:
+        print(f"=== ACCURACY EVALUATION REQUEST ===")
+        print(f"Mode: {request.mode}")
+        print(f"Reference text (first 100): {request.reference_text[:100]}...")
+        print(f"Predicted text (first 100): {request.predicted_text[:100]}...")
+        print(f"===================================")
+        
+        metrics = calculate_accuracy_metrics(request.reference_text, request.predicted_text)
+        
+        print(f"Accuracy result: {metrics['overall_accuracy']}% ({metrics['quality_level']})")
+        
+        return AccuracyResponse(**metrics)
+        
+    except Exception as e:
+        print(f"Error during accuracy evaluation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Accuracy evaluation failed: {str(e)}")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

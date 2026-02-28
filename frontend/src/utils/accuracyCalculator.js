@@ -125,6 +125,14 @@ export const calculateWordSimilarity = (original, generated) => {
 
 // Detailed accuracy report
 export const generateAccuracyReport = (original, generated) => {
+  // Calculate WER for additional metrics
+  const werResult = calculateWERAccuracy(original, generated);
+  
+  // Calculate word counts
+  const originalWordCount = normalizeText(original).split(' ').filter(w => w).length;
+  const generatedWordCount = normalizeText(generated).split(' ').filter(w => w).length;
+  const wordDifference = Math.abs(originalWordCount - generatedWordCount);
+  
   // Primary accuracy: Use Levenshtein similarity to align with backend "Similarity Score"
   // This is more user-friendly than WER (which can be harsh on word order)
   const overallAccuracy = calculateLevenshteinSimilarity(original, generated);
@@ -144,8 +152,8 @@ export const generateAccuracyReport = (original, generated) => {
     levenshteinScore: calculateLevenshteinSimilarity(original, generated),
     wordScore: calculateWordSimilarity(original, generated),
     qualityLevel,
-    originalWordCount: originalWords,
-    generatedWordCount: generatedWords,
+    originalWordCount,
+    generatedWordCount,
     wordDifference,
     metrics: {
       werPercentage: werResult.werPercentage,

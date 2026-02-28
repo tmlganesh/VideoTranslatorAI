@@ -612,17 +612,17 @@ Well, it's an old fashioned notion. But I think it's time we give it a try. We n
               {!isCalculating && (accuracyReport || backendAccuracy) && (
                 <div style={accuracyResultsStyle}>
                   {(() => {
-                    // Priority: Backend Similarity > Backend Accuracy (clamped) > Local Similarity
+                    // Priority: Backend overall_accuracy > Local Similarity
                     const primaryAccuracy = backendAccuracy
-                      ? (backendAccuracy.similarity_score ?? backendAccuracy.accuracy)
+                      ? (backendAccuracy.overall_accuracy ?? backendAccuracy.similarity_score ?? backendAccuracy.accuracy ?? 0)
                       : (accuracyReport ? accuracyReport.overallAccuracy : null);
 
                     const primaryQuality = backendAccuracy
-                      ? backendAccuracy.quality_level
+                      ? (backendAccuracy.quality_level ?? 'Unknown')
                       : (accuracyReport ? accuracyReport.qualityLevel : null);
 
                     const sourceLabel = backendAccuracy
-                      ? (backendAccuracy.similarity_score !== undefined ? 'AI Match Score' : 'Backend Accuracy')
+                      ? 'Backend Accuracy'
                       : 'Local Similarity';
 
                     if (primaryAccuracy == null) return null;
@@ -730,23 +730,23 @@ Well, it's an old fashioned notion. But I think it's time we give it a try. We n
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
                     <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', border: '1px solid rgba(255,255,255,0.15)' }}>
                       <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>Match Score</div>
-                      <div style={{ fontWeight: 700, fontSize: '20px', color: getAccuracyColor(backendAccuracy.similarity_score ?? backendAccuracy.accuracy) }}>
-                        {(backendAccuracy.similarity_score ?? backendAccuracy.accuracy).toFixed(2)}%
+                      <div style={{ fontWeight: 700, fontSize: '20px', color: getAccuracyColor(backendAccuracy?.overall_accuracy ?? backendAccuracy?.similarity_score ?? backendAccuracy?.accuracy ?? 0) }}>
+                        {(backendAccuracy?.overall_accuracy ?? backendAccuracy?.similarity_score ?? backendAccuracy?.accuracy ?? 0).toFixed(2)}%
                       </div>
                       <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)' }}>Sequence Match</div>
                     </div>
                     <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', border: '1px solid rgba(255,255,255,0.15)' }}>
                       <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>WER Score</div>
-                      <div style={{ fontWeight: 700, fontSize: '20px', color: '#0ea5e9' }}>{backendAccuracy.wer_percentage.toFixed(2)}%</div>
+                      <div style={{ fontWeight: 700, fontSize: '20px', color: '#0ea5e9' }}>{(backendAccuracy?.wer_percentage ?? 0).toFixed(2)}%</div>
                       <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)' }}>Lower is better</div>
                     </div>
                     <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', border: '1px solid rgba(255,255,255,0.15)' }}>
                       <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>Reference Words</div>
-                      <div style={{ fontWeight: 700, fontSize: '20px', color: 'white' }}>{backendAccuracy.reference_words}</div>
+                      <div style={{ fontWeight: 700, fontSize: '20px', color: 'white' }}>{backendAccuracy?.reference_word_count ?? backendAccuracy?.reference_words ?? 0}</div>
                     </div>
                     <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: '10px', padding: '16px', border: '1px solid rgba(255,255,255,0.15)' }}>
                       <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>Predicted Words</div>
-                      <div style={{ fontWeight: 700, fontSize: '20px', color: 'white' }}>{backendAccuracy.predicted_words}</div>
+                      <div style={{ fontWeight: 700, fontSize: '20px', color: 'white' }}>{backendAccuracy?.predicted_word_count ?? backendAccuracy?.predicted_words ?? 0}</div>
                     </div>
                   </div>
                 </div>

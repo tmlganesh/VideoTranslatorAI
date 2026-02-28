@@ -6,3 +6,4 @@ pydantic
 python-multipart
 youtube-transcript-api
 jiwer
+python-dotenv

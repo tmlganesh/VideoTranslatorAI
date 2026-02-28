@@ -149,9 +149,10 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
             <option value="gu">Gujarati</option>
             <option value="mr">Marathi</option>
             <option value="bn">Bengali</option>
-            <option value="or">Odia</option>
+            <option value="od">Odia</option>
             <option value="pa">Punjabi</option>
             <option value="as">Assamese</option>
+            <option value="ne">Nepali</option>
           </select>
         </div>
 
