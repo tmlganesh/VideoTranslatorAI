@@ -17,7 +17,7 @@ See if they could work together when we needed them to, to fight the battles tha
 
 Well, it's an old fashioned notion. But I think it's time we give it a try. We need a response team. These people are dangerous.`;
 
-  // Use real translation from Sarvam AI or show message if no translation
+  // Use real translation result — non-empty string means we have a translation
   const actualTranslation = translationResult && translationResult.trim() !== "" ? translationResult : null;
 
   // Language name mapping for display
@@ -811,7 +811,11 @@ Well, it's an old fashioned notion. But I think it's time we give it a try. We n
               </div>
             </div>
             <div style={metaStyle}>
-              {actualTranslation ? `${getLanguageName(targetLanguage)} • Translated from ${detectedLanguage?.name || 'Auto-detected'}` : 'No translation requested'}
+              {actualTranslation
+                ? `${getLanguageName(detectedLanguage?.code || 'te')} → ${getLanguageName(targetLanguage || 'en')} • Translated from ${detectedLanguage?.name || 'Auto-detected'}`
+                : targetLanguage
+                  ? `Translation to ${getLanguageName(targetLanguage)} was requested but not returned — check backend logs`
+                  : 'No translation language selected'}
             </div>
             <div style={textContentStyle}>
               {actualTranslation ? (
