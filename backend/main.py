@@ -10,15 +10,16 @@ import uvicorn
 import shutil
 import glob
 import re
-import requests
 import json
+import time
+import torch
+from transformers import MarianMTModel, MarianTokenizer
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-SARVAM_API_KEY = os.getenv('SARVAM_API_KEY')
 
 def setup_ffmpeg_path():
     """Find and setup FFmpeg path"""
@@ -53,6 +54,107 @@ FFMPEG_PATH = setup_ffmpeg_path()
 print("Loading Whisper base model...")
 model = whisper.load_model("base")  # Smaller, faster model for development
 print("Whisper model loaded successfully!")
+
+# Cache for Helsinki-NLP opus-mt translation models (loaded on-demand)
+_translation_model_cache = {}
+
+# Helsinki-NLP opus-mt language code mapping
+# Maps (source_lang, target_lang) → model name
+# Models are purpose-built bilingual or multilingual Marian-MT transformers
+OPUS_MT_MODEL_MAP = {
+    # --- Indian languages → English ---
+    ('te', 'en'): 'Helsinki-NLP/opus-mt-te-en',
+    ('hi', 'en'): 'Helsinki-NLP/opus-mt-hi-en',
+    ('ta', 'en'): 'Helsinki-NLP/opus-mt-dra-en',   # Dravidian → English
+    ('kn', 'en'): 'Helsinki-NLP/opus-mt-dra-en',
+    ('ml', 'en'): 'Helsinki-NLP/opus-mt-dra-en',
+    ('bn', 'en'): 'Helsinki-NLP/opus-mt-bn-en',
+    ('ur', 'en'): 'Helsinki-NLP/opus-mt-ur-en',
+    ('mr', 'en'): 'Helsinki-NLP/opus-mt-mr-en',
+    # --- English → Indian languages ---
+    ('en', 'hi'): 'Helsinki-NLP/opus-mt-en-hi',     # Dedicated en→hi model
+    ('en', 'te'): 'Helsinki-NLP/opus-mt-en-dra',    # Dravidian family (needs >>tel<< prefix)
+    ('en', 'ta'): 'Helsinki-NLP/opus-mt-en-dra',    # (needs >>tam<< prefix)
+    ('en', 'kn'): 'Helsinki-NLP/opus-mt-en-dra',    # (needs >>kan<< prefix)
+    ('en', 'ml'): 'Helsinki-NLP/opus-mt-en-dra',    # (needs >>mal<< prefix)
+    ('en', 'bn'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>ben<< prefix)
+    ('en', 'ur'): 'Helsinki-NLP/opus-mt-en-ur',
+    ('en', 'mr'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>mar<< prefix)
+    # --- European languages ---
+    ('fr', 'en'): 'Helsinki-NLP/opus-mt-fr-en',
+    ('en', 'fr'): 'Helsinki-NLP/opus-mt-en-fr',
+    ('de', 'en'): 'Helsinki-NLP/opus-mt-de-en',
+    ('en', 'de'): 'Helsinki-NLP/opus-mt-en-de',
+    ('es', 'en'): 'Helsinki-NLP/opus-mt-es-en',
+    ('en', 'es'): 'Helsinki-NLP/opus-mt-en-es',
+    ('pt', 'en'): 'Helsinki-NLP/opus-mt-pt-en',
+    ('en', 'pt'): 'Helsinki-NLP/opus-mt-en-pt',
+    ('it', 'en'): 'Helsinki-NLP/opus-mt-it-en',
+    ('en', 'it'): 'Helsinki-NLP/opus-mt-en-it',
+    ('ru', 'en'): 'Helsinki-NLP/opus-mt-ru-en',
+    ('en', 'ru'): 'Helsinki-NLP/opus-mt-en-ru',
+    ('zh', 'en'): 'Helsinki-NLP/opus-mt-zh-en',
+    ('en', 'zh'): 'Helsinki-NLP/opus-mt-en-zh',
+    ('ja', 'en'): 'Helsinki-NLP/opus-mt-ja-en',
+    ('en', 'ja'): 'Helsinki-NLP/opus-mt-en-jap',
+    ('ar', 'en'): 'Helsinki-NLP/opus-mt-ar-en',
+    ('en', 'ar'): 'Helsinki-NLP/opus-mt-en-ar',
+    ('ko', 'en'): 'Helsinki-NLP/opus-mt-ko-en',
+    ('en', 'ko'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>kor<< prefix)
+    ('tr', 'en'): 'Helsinki-NLP/opus-mt-tr-en',
+    ('en', 'tr'): 'Helsinki-NLP/opus-mt-en-trk',
+}
+
+# Language prefix tokens required by multilingual models (en-dra, en-mul, dra-en)
+# These tokens MUST be prepended to SOURCE text for the model to know the target language.
+# Format: >>three_letter_code<<
+# Only needed for models that handle multiple target languages.
+LANG_PREFIX_MAP = {
+    # en-dra targets (Dravidian family)
+    ('en', 'te'): '>>tel<< ',
+    ('en', 'ta'): '>>tam<< ',
+    ('en', 'kn'): '>>kan<< ',
+    ('en', 'ml'): '>>mal<< ',
+    # en-mul targets
+    ('en', 'bn'): '>>ben<< ',
+    ('en', 'mr'): '>>mar<< ',
+    ('en', 'ko'): '>>kor<< ',
+    # dra-en sources (some dra-en models may need source prefix)
+    # Usually bilingual dra→en models auto-detect, but if needed:
+    # ('ta', 'en'): '>>eng<< ',
+}
+
+def get_translation_model(source_lang: str, target_lang: str):
+    """
+    Load (or retrieve from cache) the appropriate Helsinki-NLP opus-mt model
+    for the given language pair. Raises ValueError if no model is found.
+    """
+    pair = (source_lang, target_lang)
+    if pair in _translation_model_cache:
+        return _translation_model_cache[pair]
+
+    model_name = OPUS_MT_MODEL_MAP.get(pair)
+    if not model_name:
+        # Generic fallback: try a direct bilingual model name
+        if target_lang == 'en':
+            model_name = f'Helsinki-NLP/opus-mt-{source_lang}-en'
+        elif source_lang == 'en':
+            model_name = 'Helsinki-NLP/opus-mt-en-mul'
+        else:
+            raise ValueError(
+                f"No translation model available for {source_lang}→{target_lang}. "
+                f"Will attempt pivot translation through English."
+            )
+
+    print(f"Loading translation model: {model_name}")
+    tokenizer = MarianTokenizer.from_pretrained(model_name)
+    mt_model = MarianMTModel.from_pretrained(model_name)
+    mt_model.eval()
+    _translation_model_cache[pair] = (tokenizer, mt_model, model_name)
+    print(f"Translation model loaded: {model_name}")
+    return tokenizer, mt_model, model_name
+
+print("Helsinki-NLP opus-mt translation models will be loaded on-demand (first use).")
 
 def extract_youtube_video_id(url):
     """Extract YouTube video ID from various YouTube URL formats."""
@@ -194,128 +296,126 @@ def improve_telugu_transcription(text, language_code):
     
     return text.strip()
 
-async def translate_with_sarvam_ai(text: str, source_language: str, target_language: str):
+def _split_into_chunks(text: str, max_chunk_chars: int = 400) -> list:
     """
-    Translate text using Sarvam AI API with high accuracy for Indian languages.
-    Handles long texts by splitting into chunks under 2000 characters.
+    Split text into sentence-level chunks that stay within max_chunk_chars.
+    Marian models work best with individual sentences or short paragraphs.
     """
-    if not SARVAM_API_KEY:
-        raise HTTPException(status_code=500, detail="Sarvam AI API key not configured")
-    
-    # Language code mapping for Sarvam AI (all 13 supported languages)
-    # Sarvam AI uses ISO language codes with -IN suffix
-    sarvam_language_map = {
-        'en': 'en-IN',      # English
-        'hi': 'hi-IN',      # Hindi
-        'te': 'te-IN',      # Telugu
-        'ta': 'ta-IN',      # Tamil
-        'kn': 'kn-IN',      # Kannada
-        'ml': 'ml-IN',      # Malayalam
-        'gu': 'gu-IN',      # Gujarati
-        'mr': 'mr-IN',      # Marathi
-        'bn': 'bn-IN',      # Bengali
-        'od': 'od-IN',      # Odia (Sarvam uses 'od')
-        'or': 'od-IN',      # Odia (alternate code mapping)
-        'pa': 'pa-IN',      # Punjabi
-        'as': 'as-IN',      # Assamese
-        'ne': 'ne-IN',      # Nepali (13th language)
-    }
-    
-    # Map to Sarvam AI language codes
-    source_lang = sarvam_language_map.get(source_language, 'en-IN')
-    target_lang = sarvam_language_map.get(target_language, 'te-IN')
-    
-    print(f"=== SARVAM AI TRANSLATION DEBUG ===")
-    print(f"Input source_language: '{source_language}'")
-    print(f"Input target_language: '{target_language}'")
-    print(f"Mapped source_lang: '{source_lang}'")
-    print(f"Mapped target_lang: '{target_lang}'")
-    print(f"Text length: {len(text)} characters")
-    print(f"API Key present: {bool(SARVAM_API_KEY)}")
-    print(f"===================================")
-    
-    # Split text into chunks if it's longer than 1800 characters (leaving some buffer)
-    max_chunk_size = 1800
+    if len(text) <= max_chunk_chars:
+        return [text]
+
+    sentences = re.split(r'(?<=[.!?|।\n])\s*', text)
     text_chunks = []
-    
-    if len(text) <= max_chunk_size:
-        text_chunks = [text]
-    else:
-        # Split by common sentence separators (handles Hindi | and English .)
-        import re
-        # Split on | or . followed by space, keeping the separator
-        sentences = re.split(r'(?<=[|।.!?\n])\s*', text)
-        current_chunk = ""
-        
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
-                current_chunk += sentence + " "
+    current_chunk = ""
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(current_chunk) + len(sentence) + 1 <= max_chunk_chars:
+            current_chunk += sentence + " "
+        else:
+            if current_chunk:
+                text_chunks.append(current_chunk.strip())
+            if len(sentence) > max_chunk_chars:
+                for i in range(0, len(sentence), max_chunk_chars):
+                    text_chunks.append(sentence[i:i + max_chunk_chars])
+                current_chunk = ""
             else:
-                if current_chunk:
-                    text_chunks.append(current_chunk.strip())
-                # If single sentence is too long, force split it
-                if len(sentence) > max_chunk_size:
-                    for i in range(0, len(sentence), max_chunk_size):
-                        text_chunks.append(sentence[i:i+max_chunk_size])
-                    current_chunk = ""
-                else:
-                    current_chunk = sentence + " "
-        
-        if current_chunk:
-            text_chunks.append(current_chunk.strip())
-    
-    print(f"Translating {len(text_chunks)} chunk(s) of text...")
-    
+                current_chunk = sentence + " "
+    if current_chunk:
+        text_chunks.append(current_chunk.strip())
+    return text_chunks if text_chunks else [text]
+
+
+def _translate_direct(text: str, source_lang: str, target_lang: str) -> str:
+    """
+    Translate text directly using a single opus-mt model.
+    Handles language prefix tokens for multilingual models automatically.
+    """
+    tokenizer, mt_model, model_name = get_translation_model(source_lang, target_lang)
+
+    # Check if this language pair needs a prefix token for the target language
+    prefix = LANG_PREFIX_MAP.get((source_lang, target_lang), '')
+    if prefix:
+        print(f"  Using language prefix: {prefix.strip()}")
+
+    text_chunks = _split_into_chunks(text)
+    print(f"  Translating {len(text_chunks)} chunk(s) with {model_name}...")
     translated_chunks = []
-    
+
+    translation_start = time.time()
+    for i, chunk in enumerate(text_chunks):
+        # Prepend the language prefix token if required by this model
+        input_text = prefix + chunk if prefix else chunk
+
+        inputs = tokenizer(
+            [input_text],
+            return_tensors="pt",
+            max_length=512,
+            truncation=True,
+            padding=True
+        )
+        with torch.no_grad():
+            outputs = mt_model.generate(
+                **inputs,
+                max_length=512,
+                num_beams=5,
+                length_penalty=1.0,
+                early_stopping=True
+            )
+        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        translated_chunks.append(decoded)
+        print(f"  Chunk {i+1}/{len(text_chunks)}: {decoded[:80]}")
+
+    translation_time = time.time() - translation_start
+    print(f"  Direct translation completed in {translation_time:.2f}s")
+    return ' '.join(translated_chunks)
+
+
+def translate_text(text: str, source_lang: str, target_lang: str) -> str:
+    """
+    Translate text using Helsinki-NLP/opus-mt models (purpose-built for translation).
+    Models are loaded on-demand and cached. Runs entirely on CPU with no external API calls.
+
+    For non-English↔non-English pairs (e.g., Telugu→Hindi), automatically performs
+    pivot translation through English: source→English→target.
+    """
+    print(f"=== opus-mt TRANSLATION ===")
+    print(f"Source: {source_lang} → Target: {target_lang}")
+    print(f"Text length: {len(text)} characters")
+
+    # Same language — no translation needed
+    if source_lang == target_lang:
+        print("Source and target languages are the same. Skipping translation.")
+        return text
+
     try:
-        url = 'https://api.sarvam.ai/translate'
-        headers = {
-            'api-subscription-key': SARVAM_API_KEY,
-            'content-type': 'application/json'
-        }
-        
-        for i, chunk in enumerate(text_chunks):
-            print(f"Translating chunk {i+1}/{len(text_chunks)} ({len(chunk)} chars)...")
-            
-            payload = {
-                "input": chunk,
-                "source_language_code": source_lang,
-                "target_language_code": target_lang,
-                "model": "sarvam-translate:v1",
-                "mode": "formal",
-                "numerals_format": "native",
-                "speaker_gender": "Male",
-                "enable_preprocessing": True
-            }
-            
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            
-            print(f"API Response Status: {response.status_code}")
-            print(f"API Response: {response.text[:200]}...")
-            
-            if response.status_code == 200:
-                result = response.json()
-                translated_text = result.get('translated_text', chunk)
-                print(f"Translated text preview: {translated_text[:100]}...")
-                translated_chunks.append(translated_text)
+        # Try direct translation first
+        try:
+            result = _translate_direct(text, source_lang, target_lang)
+            print(f"=== Direct translation successful ===")
+            return result
+        except ValueError:
+            # No direct model → pivot through English
+            if source_lang != 'en' and target_lang != 'en':
+                print(f"No direct model for {source_lang}→{target_lang}. "
+                      f"Pivoting through English: {source_lang}→en→{target_lang}")
+                # Step 1: source → English
+                english_text = _translate_direct(text, source_lang, 'en')
+                print(f"Pivot step 1 done ({source_lang}→en): {english_text[:100]}...")
+                # Step 2: English → target
+                result = _translate_direct(english_text, 'en', target_lang)
+                print(f"Pivot step 2 done (en→{target_lang}): {result[:100]}...")
+                print(f"=== Pivot translation successful ===")
+                return result
             else:
-                print(f"Sarvam AI translation error for chunk {i+1}: {response.status_code} - {response.text}")
-                # Use original chunk if translation fails
-                translated_chunks.append(chunk)
-        
-        # Join all translated chunks
-        final_translation = ' '.join(translated_chunks)
-        return final_translation
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Sarvam AI API request failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Translation request failed: {str(e)}")
+                raise
+
+    except ValueError as e:
+        print(f"Translation model error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        print(f"Sarvam AI translation error: {str(e)}")
+        print(f"opus-mt translation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
 
 def try_api_video_transcription(video_url, api_key=None):
@@ -449,12 +549,12 @@ async def transcribe_video(request: TranscriptionRequest):
                 
                 if effective_target and effective_target != "Same as Original (No Translation)" and effective_target != lang_code:
                     try:
-                        print(f"Starting translation from {lang_code} to {effective_target}")
+                        print(f"Starting opus-mt translation from {lang_code} to {effective_target}")
                         print(f"Transcript text (first 200 chars): {transcript_text[:200]}...")
-                        translation_text = await translate_with_sarvam_ai(
+                        translation_text = translate_text(
                             text=transcript_text,
-                            source_language=lang_code,
-                            target_language=effective_target
+                            source_lang=lang_code,
+                            target_lang=effective_target
                         )
                         print(f"Translation result (first 200 chars): {translation_text[:200]}...")
                         target_lang = effective_target
@@ -524,21 +624,25 @@ async def transcribe_video(request: TranscriptionRequest):
             audio = whisper.pad_or_trim(audio)
             print(f"Audio after padding/trimming, shape: {audio.shape if hasattr(audio, 'shape') else 'unknown'}")
             
-            # Instead of trying to detect language, let's directly transcribe with auto-detection
+            # Transcribe with automatic language detection — log latency
+            transcribe_start = time.time()
             result = model.transcribe(audio_file_path, language=None)
+            transcribe_time = time.time() - transcribe_start
             detected_language_code = result.get('language', 'en')
             transcription_text = result["text"].strip()
-            
-            print(f"Direct transcription successful. Language: {detected_language_code}")
+            print(f"Direct transcription successful. Language: {detected_language_code} | Time: {transcribe_time:.2f}s")
             
         except Exception as lang_detect_error:
             print(f"Language detection failed: {lang_detect_error}")
             print("Falling back to direct transcription without language detection...")
             
             # Fallback: direct transcription
+            transcribe_start = time.time()
             result = model.transcribe(audio_file_path)
+            transcribe_time = time.time() - transcribe_start
             detected_language_code = result.get('language', 'en')
             transcription_text = result["text"].strip()
+            print(f"Fallback transcription done in {transcribe_time:.2f}s")
         
         # Get language name
         language_names = {
@@ -572,13 +676,13 @@ async def transcribe_video(request: TranscriptionRequest):
         
         if effective_target and effective_target != "Same as Original (No Translation)" and effective_target != detected_language_code:
             try:
-                translation_text = await translate_with_sarvam_ai(
+                translation_text = translate_text(
                     text=transcription_text,
-                    source_language=detected_language_code,
-                    target_language=effective_target
+                    source_lang=detected_language_code,
+                    target_lang=effective_target
                 )
                 target_lang = effective_target
-                print(f"Translation completed for video transcription")
+                print(f"opus-mt translation completed for video transcription")
             except Exception as e:
                 print(f"Translation failed for video transcription: {str(e)}")
                 # Clean up and return error status
@@ -665,22 +769,45 @@ async def transcribe_uploaded_file(file: UploadFile = File(...)):
         
         # Apply language-specific improvements
         transcription_text = improve_telugu_transcription(transcription_text, detected_language_code)
-        
+
         print(f"File transcription completed: {transcription_text[:100]}...")
-        
+
         # Clean up temporary file
         try:
             os.remove(temp_file_path)
         except OSError:
             pass
-        
+
+        # Auto-translate non-English to English (same logic as URL endpoint)
+        translation_text = None
+        target_lang = None
+        effective_target = None
+
+        if detected_language_code != 'en':
+            effective_target = 'en'
+            print(f"Auto-translating file transcription from {detected_language_code} to English")
+
+        if effective_target:
+            try:
+                translation_text = translate_text(
+                    text=transcription_text,
+                    source_lang=detected_language_code,
+                    target_lang=effective_target
+                )
+                target_lang = effective_target
+                print(f"opus-mt translation completed for file transcription")
+            except Exception as e:
+                print(f"Translation failed for file transcription: {str(e)}")
+                # Return what we have — don't fail the whole request over translation
+                translation_text = None
+
         return TranscriptionResponse(
             transcription=transcription_text,
             detected_language=detected_language_name,
             language_code=detected_language_code,
             status="success_file_transcription",
-            translation="",
-            target_language=""
+            translation=translation_text or "",
+            target_language=target_lang or ""
         )
     
     except Exception as e:
@@ -696,27 +823,27 @@ async def transcribe_uploaded_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"File transcription failed: {str(e)}")
 
 @app.post("/api/translate/", response_model=TranslationResponse)
-async def translate_text(request: TranslationRequest):
+async def translate_endpoint(request: TranslationRequest):
     """
-    Translate text using Sarvam AI with high accuracy for Indian languages.
-    Supports multiple Indian languages including Telugu, Hindi, Tamil, etc.
+    Translate text using local Helsinki-NLP/opus-mt models.
+    Fully offline — no external API calls. Supports all major languages.
     """
     try:
         print(f"Translation request: {request.source_language} -> {request.target_language}")
         print(f"Text to translate: {request.text[:100]}...")
-        
+
         if not request.text.strip():
             raise HTTPException(status_code=400, detail="Text to translate cannot be empty")
-        
-        # Use Sarvam AI for translation
-        translated_text = await translate_with_sarvam_ai(
+
+        # Local mT5 translation (synchronous, CPU-only)
+        translated_text = translate_text(
             text=request.text,
-            source_language=request.source_language,
-            target_language=request.target_language
+            source_lang=request.source_language,
+            target_lang=request.target_language
         )
-        
+
         print(f"Translation completed: {translated_text[:100]}...")
-        
+
         return TranslationResponse(
             original_text=request.text,
             translated_text=translated_text,
@@ -724,9 +851,8 @@ async def translate_text(request: TranslationRequest):
             target_language=request.target_language,
             status="success"
         )
-        
+
     except HTTPException:
-        # Re-raise HTTP exceptions as they are already properly formatted
         raise
     except Exception as e:
         print(f"Error during translation: {str(e)}")

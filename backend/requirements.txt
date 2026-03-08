@@ -7,3 +7,6 @@ python-multipart
 youtube-transcript-api
 jiwer
 python-dotenv
+transformers
+torch
+sentencepiece
