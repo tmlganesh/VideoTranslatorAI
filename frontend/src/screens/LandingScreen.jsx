@@ -142,7 +142,7 @@ const LandingScreen = ({ onNext }) => {
         </h1>
         
         <p style={descriptionStyle}>
-          Upload your videos or paste a link to automatically extract audio, 
+          Paste a video link to automatically extract audio, 
           transcribe speech to text, and translate to any language using 
           advanced AI technology.
         </p>

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -80,6 +80,11 @@ OPUS_MT_MODEL_MAP = {
     ('en', 'bn'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>ben<< prefix)
     ('en', 'ur'): 'Helsinki-NLP/opus-mt-en-ur',
     ('en', 'mr'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>mar<< prefix)
+    ('en', 'gu'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>guj<< prefix)
+    ('en', 'pa'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>pan<< prefix)
+    ('en', 'as'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>asm<< prefix)
+    ('en', 'ne'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>nep<< prefix)
+    ('en', 'od'): 'Helsinki-NLP/opus-mt-en-mul',    # (needs >>ori<< prefix)
     # --- European languages ---
     ('fr', 'en'): 'Helsinki-NLP/opus-mt-fr-en',
     ('en', 'fr'): 'Helsinki-NLP/opus-mt-en-fr',
@@ -118,6 +123,11 @@ LANG_PREFIX_MAP = {
     # en-mul targets
     ('en', 'bn'): '>>ben<< ',
     ('en', 'mr'): '>>mar<< ',
+    ('en', 'gu'): '>>guj<< ',
+    ('en', 'pa'): '>>pan<< ',
+    ('en', 'as'): '>>asm<< ',
+    ('en', 'ne'): '>>nep<< ',
+    ('en', 'od'): '>>ori<< ',
     ('en', 'ko'): '>>kor<< ',
     # dra-en sources (some dra-en models may need source prefix)
     # Usually bilingual dra→en models auto-detect, but if needed:
@@ -650,7 +660,8 @@ async def transcribe_video(request: TranscriptionRequest):
             'ml': 'Malayalam', 'bn': 'Bengali', 'gu': 'Gujarati', 'mr': 'Marathi', 'pa': 'Punjabi',
             'ur': 'Urdu', 'zh': 'Chinese', 'ja': 'Japanese', 'ko': 'Korean', 'ar': 'Arabic',
             'fr': 'French', 'de': 'German', 'es': 'Spanish', 'pt': 'Portuguese', 'ru': 'Russian',
-            'it': 'Italian', 'tr': 'Turkish', 'nl': 'Dutch', 'sv': 'Swedish', 'da': 'Danish', 'no': 'Norwegian'
+            'it': 'Italian', 'tr': 'Turkish', 'nl': 'Dutch', 'sv': 'Swedish', 'da': 'Danish', 
+            'no': 'Norwegian', 'or': 'Odia', 'as': 'Assamese', 'ne': 'Nepali', 'si': 'Sinhala'
         }
         
         detected_language_name = language_names.get(detected_language_code, detected_language_code.upper())
@@ -716,111 +727,6 @@ async def transcribe_video(request: TranscriptionRequest):
             shutil.rmtree(temp_dir, ignore_errors=True)
         
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
-
-@app.post("/api/transcribe-file/", response_model=TranscriptionResponse)
-async def transcribe_uploaded_file(file: UploadFile = File(...)):
-    """
-    Transcribe audio from an uploaded file using whisper with language detection.
-    """
-    try:
-        # Create a temporary file for the uploaded file
-        with tempfile.NamedTemporaryFile(suffix=f".{file.filename.split('.')[-1]}", delete=False) as temp_file:
-            temp_file_path = temp_file.name
-            shutil.copyfileobj(file.file, temp_file)
-        
-        print("Loading audio for language detection...")
-        
-        try:
-            # Load audio and detect language
-            audio = whisper.load_audio(temp_file_path)
-            print(f"Audio loaded, shape: {audio.shape if hasattr(audio, 'shape') else 'unknown'}")
-            
-            audio = whisper.pad_or_trim(audio)
-            print(f"Audio after padding/trimming, shape: {audio.shape if hasattr(audio, 'shape') else 'unknown'}")
-            
-            # Instead of trying to detect language, let's directly transcribe with auto-detection
-            result = model.transcribe(temp_file_path, language=None)
-            detected_language_code = result.get('language', 'en')
-            transcription_text = result["text"].strip()
-            
-            print(f"Direct transcription successful. Language: {detected_language_code}")
-            
-        except Exception as lang_detect_error:
-            print(f"Language detection failed: {lang_detect_error}")
-            print("Falling back to direct transcription without language detection...")
-            
-            # Fallback: direct transcription
-            result = model.transcribe(temp_file_path)
-            detected_language_code = result.get('language', 'en')
-            transcription_text = result["text"].strip()
-        
-        # Get language name
-        language_names = {
-            'en': 'English', 'hi': 'Hindi', 'te': 'Telugu', 'ta': 'Tamil', 'kn': 'Kannada',
-            'ml': 'Malayalam', 'bn': 'Bengali', 'gu': 'Gujarati', 'mr': 'Marathi', 'pa': 'Punjabi',
-            'ur': 'Urdu', 'zh': 'Chinese', 'ja': 'Japanese', 'ko': 'Korean', 'ar': 'Arabic',
-            'fr': 'French', 'de': 'German', 'es': 'Spanish', 'pt': 'Portuguese', 'ru': 'Russian',
-            'it': 'Italian', 'tr': 'Turkish', 'nl': 'Dutch', 'sv': 'Swedish', 'da': 'Danish', 'no': 'Norwegian'
-        }
-        
-        detected_language_name = language_names.get(detected_language_code, detected_language_code.upper())
-        
-        print(f"Detected language: {detected_language_name} ({detected_language_code})")
-        
-        # Apply language-specific improvements
-        transcription_text = improve_telugu_transcription(transcription_text, detected_language_code)
-
-        print(f"File transcription completed: {transcription_text[:100]}...")
-
-        # Clean up temporary file
-        try:
-            os.remove(temp_file_path)
-        except OSError:
-            pass
-
-        # Auto-translate non-English to English (same logic as URL endpoint)
-        translation_text = None
-        target_lang = None
-        effective_target = None
-
-        if detected_language_code != 'en':
-            effective_target = 'en'
-            print(f"Auto-translating file transcription from {detected_language_code} to English")
-
-        if effective_target:
-            try:
-                translation_text = translate_text(
-                    text=transcription_text,
-                    source_lang=detected_language_code,
-                    target_lang=effective_target
-                )
-                target_lang = effective_target
-                print(f"opus-mt translation completed for file transcription")
-            except Exception as e:
-                print(f"Translation failed for file transcription: {str(e)}")
-                # Return what we have — don't fail the whole request over translation
-                translation_text = None
-
-        return TranscriptionResponse(
-            transcription=transcription_text,
-            detected_language=detected_language_name,
-            language_code=detected_language_code,
-            status="success_file_transcription",
-            translation=translation_text or "",
-            target_language=target_lang or ""
-        )
-    
-    except Exception as e:
-        print(f"Error during file transcription: {str(e)}")
-        
-        # Clean up temporary file in case of error
-        try:
-            if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-        except OSError:
-            pass
-        
-        raise HTTPException(status_code=500, detail=f"File transcription failed: {str(e)}")
 
 @app.post("/api/translate/", response_model=TranslationResponse)
 async def translate_endpoint(request: TranslationRequest):

@@ -1,215 +1,483 @@
-# Video Transcription Pipeline
+# VideoTranslatorAI
 
-A complete full-stack application for video transcription using FastAPI backend and React frontend. This application can transcribe audio from video URLs (YouTube, etc.) using AI-powered speech recognition and translate to multiple languages.
-
-## ✨ NEW: Text Accuracy Calculator
-
-This project now includes a **Text Accuracy Checker** that calculates how accurate your transcription is! 
-
-📊 **Features**:
-- Upload original text files or paste from clipboard
-- Compare against generated transcription
-- Get detailed accuracy metrics (character-level and word-level analysis)
-- Beautiful color-coded results display
-- Quality level assessment (Excellent/Very Good/Good/Fair/Poor)
-
-📚 **Documentation**: See [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md) for complete guides and examples.
+> **Fully local AI pipeline** — Speech-to-Text via OpenAI Whisper + Text Translation via Google mT5. No external APIs. Runs entirely on CPU.
 
 ---
 
-## Features
+## Table of Contents
 
-- **Video URL Input**: Support for various video platforms (YouTube, etc.)
-- **AI Transcription**: Uses OpenAI's Whisper model for accurate speech-to-text
-- **Translation**: Multi-language translation support
-- **Text Accuracy Analysis**: NEW - Compare transcriptions with original text
-- **Modern UI**: Clean, responsive React interface
-- **Real-time Progress**: Loading indicators and error handling
-- **Copy to Clipboard**: Easy text copying functionality
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Project Structure](#project-structure)
+4. [Tech Stack](#tech-stack)
+5. [AI Models](#ai-models)
+6. [API Reference](#api-reference)
+7. [Frontend Screens](#frontend-screens)
+8. [Setup & Installation](#setup--installation)
+9. [Running the Application](#running-the-application)
+10. [Accuracy Evaluation](#accuracy-evaluation)
+11. [Supported Languages](#supported-languages)
+12. [Performance Notes](#performance-notes)
+
+---
+
+## Overview
+
+VideoTranslatorAI is a full-stack web application that:
+
+- Accepts a **YouTube URL** or **uploaded audio/video file**
+- **Transcribes** speech to text using OpenAI Whisper (auto language detection)
+- **Translates** the transcription using Google's mT5 multilingual model — **no internet required after first model download**
+- Displays results in a clean, step-by-step React UI with copy, download, and accuracy evaluation features
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        USER (Browser)                          │
+│                  React + Vite  :5173                           │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │  HTTP (REST)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   FastAPI Backend  :8000                        │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  POST /api/transcribe/          (YouTube URL)            │   │
+│  │  POST /api/transcribe-file/     (File upload)            │   │
+│  │  POST /api/translate/           (Text translation)       │   │
+│  │  POST /api/evaluate-accuracy/   (WER / BLEU metrics)    │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────┐   ┌─────────────────────────────────┐  │
+│  │  YouTube Transcript │   │  yt-dlp + FFmpeg                │  │
+│  │  API (fast path)    │   │  (audio extraction fallback)    │  │
+│  └──────────┬──────────┘   └───────────────┬─────────────────┘  │
+│             │                              │                    │
+│             └──────────────┬───────────────┘                    │
+│                            ▼                                    │
+│              ┌─────────────────────────┐                        │
+│              │  OpenAI Whisper (base)  │  Speech → Text         │
+│              │  CPU · Auto-detect lang │                        │
+│              └─────────────┬───────────┘                        │
+│                            │                                    │
+│                            ▼                                    │
+│              ┌─────────────────────────┐                        │
+│              │  Google mT5-small       │  Text → Translation    │
+│              │  CPU · Fully Offline    │                        │
+│              └─────────────────────────┘                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Request Flow
+
+```
+Input (URL or File)
+       │
+       ├─── YouTube URL? ──YES──► YouTube Transcript API (fast, no audio download)
+       │                              │
+       │                        transcript found?
+       │                         YES │    NO │
+       │                             │       └──► [fallback to audio path]
+       │
+       └─── File / fallback ──► yt-dlp downloads audio ──► FFmpeg extracts WAV
+                                         │
+                                         ▼
+                               Whisper transcribes audio
+                               (auto language detection)
+                                         │
+                                         ▼
+                         Translation needed? (target ≠ source)
+                              YES │         NO │
+                                  ▼            └──► Return transcription only
+                           mT5-small generates translation
+                                  │
+                                  ▼
+                            API Response
+              { transcription, translation, detected_language, status }
+```
+
+---
 
 ## Project Structure
 
 ```
-videoTranslation/
+VideoTranslatorAI/
 ├── backend/
-│   ├── main.py           # FastAPI server with transcription endpoint
-│   └── requirements.txt  # Python dependencies
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx      # Main React component
-│   │   ├── App.css      # Styling
-│   │   ├── main.jsx     # React entry point
-│   │   └── index.css    # Global styles
-│   ├── index.html       # HTML template
-│   ├── package.json     # Node.js dependencies
-│   └── vite.config.js   # Vite configuration
-└── README.md            # This file
+│   ├── main.py                  # FastAPI app — all endpoints + AI models
+│   ├── accuracy_evaluator.py    # WER / character accuracy helpers
+│   ├── test_accuracy.py         # Accuracy test runner
+│   ├── test_translation.py      # mT5 translation endpoint tests
+│   ├── check_transcripts.py     # Transcript availability checker
+│   ├── requirements.txt         # Python dependencies
+│   ├── .env                     # Environment variables (local only)
+│   └── .env.example             # Env template (no secrets needed)
+│
+└── frontend/
+    └── src/
+        ├── App.jsx              # Root — step router + state management
+        ├── main.jsx             # Vite entry point
+        ├── App.css              # Global styles
+        ├── index.css            # CSS reset / base
+        ├── screens/
+        │   ├── LandingScreen.jsx     # Step 1 — Welcome / hero
+        │   ├── UploadScreen.jsx      # Step 2 — URL or file input
+        │   ├── LanguageScreen.jsx    # Step 3 — Source/target language
+        │   ├── ProcessingScreen.jsx  # Step 4 — Loading / progress
+        │   └── ResultsScreen.jsx     # Step 5 — Transcription + translation
+        ├── components/
+        │   └── ProgressBar.jsx       # Step indicator bar
+        └── utils/
+            └── accuracyCalculator.js # Client-side accuracy scoring
 ```
 
-## Prerequisites
+---
 
-Before running the application, ensure you have the following installed:
+## Tech Stack
 
-1. **Python 3.8+** - [Download Python](https://www.python.org/downloads/)
-2. **Node.js 16+** - [Download Node.js](https://nodejs.org/)
-3. **FFmpeg** - Required for audio processing
-   - Windows: Download from [FFmpeg website](https://ffmpeg.org/download.html) and add to PATH
-   - macOS: `brew install ffmpeg`
-   - Linux: `sudo apt install ffmpeg` (Ubuntu/Debian) or `sudo yum install ffmpeg` (CentOS/RHEL)
+### Backend
 
-## Installation & Setup
+| Library | Version | Purpose |
+|---|---|---|
+| `fastapi` | latest | REST API framework |
+| `uvicorn` | latest | ASGI server |
+| `openai-whisper` | latest | Speech-to-text |
+| `transformers` | ≥4.0 | mT5 model inference |
+| `torch` | latest | PyTorch (CPU) |
+| `sentencepiece` | latest | mT5 tokenizer |
+| `yt-dlp` | latest | Audio/video download |
+| `youtube-transcript-api` | latest | YouTube caption fetch |
+| `python-multipart` | latest | File upload support |
+| `jiwer` | latest | WER metric |
+| `python-dotenv` | latest | Env var loading |
 
-### Step 1: Clone or Setup Project
+### Frontend
 
-If you haven't already, navigate to your project directory:
+| Library | Version | Purpose |
+|---|---|---|
+| `react` | 18 | UI framework |
+| `vite` | 5 | Development server + bundler |
+
+---
+
+## AI Models
+
+### 1. OpenAI Whisper (`base`)
+
+| Property | Value |
+|---|---|
+| Model size | ~145 MB |
+| Device | CPU |
+| Languages | 90+ (auto-detected) |
+| Input | WAV / MP3 / MP4 audio |
+| Output | Plain text transcription + language code |
+
+**Whisper handles**: language auto-detection, Indian scripts (Telugu, Hindi, etc.), multi-accent English.
+
+---
+
+### 2. Google mT5-small
+
+| Property | Value |
+|---|---|
+| Model size | ~1.2 GB |
+| Device | CPU only |
+| Framework | HuggingFace Transformers |
+| Tokenizer | `T5Tokenizer` (SentencePiece) |
+| Languages | 101 languages |
+| Input format | `translate {source} to {target}: {text}` |
+| Max input tokens | 512 |
+| Max output tokens | 256 |
+| Beam search | 4 beams |
+
+**First launch**: model is downloaded from HuggingFace (~1.2 GB) and cached at `~/.cache/huggingface/`. All subsequent startups load instantly from disk.
+
+---
+
+## API Reference
+
+### `POST /api/transcribe/`
+
+Transcribe audio from a YouTube URL.
+
+**Request**
+```json
+{
+  "video_url": "https://www.youtube.com/watch?v=...",
+  "target_language": "te",
+  "source_language": "en"
+}
+```
+
+**Response**
+```json
+{
+  "transcription": "Hello, this is a test...",
+  "translation": "నమస్కారం, ఇది ఒక పరీక్ష...",
+  "detected_language": "English",
+  "language_code": "en",
+  "target_language": "te",
+  "status": "success_youtube_transcript"
+}
+```
+
+| Status Value | Meaning |
+|---|---|
+| `success_youtube_transcript` | Used YouTube captions (fast path) |
+| `success_whisper_transcription` | Used Whisper on downloaded audio |
+| `error_translation_failed: ...` | Transcription OK, translation failed |
+
+---
+
+### `POST /api/transcribe-file/`
+
+Upload an audio/video file directly.
+
+**Request**: `multipart/form-data` with field `file`
+
+**Response**: Same shape as `/api/transcribe/`
+
+---
+
+### `POST /api/translate/`
+
+Translate arbitrary text using mT5.
+
+**Request**
+```json
+{
+  "text": "Hello, how are you?",
+  "source_language": "en",
+  "target_language": "te"
+}
+```
+
+**Response**
+```json
+{
+  "original_text": "Hello, how are you?",
+  "translated_text": "నమస్కారం, మీరు ఎలా ఉన్నారు?",
+  "source_language": "en",
+  "target_language": "te",
+  "status": "success"
+}
+```
+
+---
+
+### `POST /api/evaluate-accuracy/`
+
+Calculate transcription/translation accuracy metrics.
+
+**Request**
+```json
+{
+  "reference_text": "Hello world this is a test",
+  "predicted_text": "Hello world this is a test",
+  "mode": "transcription"
+}
+```
+
+**Response**
+```json
+{
+  "overall_accuracy": 98.5,
+  "wer": 0.05,
+  "wer_percentage": 5.0,
+  "character_accuracy": 99.2,
+  "word_accuracy": 95.0,
+  "quality_level": "Excellent",
+  "reference_word_count": 6,
+  "predicted_word_count": 6
+}
+```
+
+| Quality Level | Overall Accuracy |
+|---|---|
+| Excellent | ≥ 95% |
+| Very Good | ≥ 85% |
+| Good | ≥ 75% |
+| Fair | ≥ 60% |
+| Poor | < 60% |
+
+---
+
+## Frontend Screens
+
+The UI is a **5-step wizard** with a persistent progress bar.
+
+| Step | Screen | Description |
+|---|---|---|
+| 1 | `LandingScreen` | Hero / welcome page, entry point |
+| 2 | `UploadScreen` | Paste YouTube URL **or** upload a local file |
+| 3 | `LanguageScreen` | Pick source language (or Auto-detect) + target language |
+| 4 | `ProcessingScreen` | Animated loading state while backend processes |
+| 5 | `ResultsScreen` | View transcription + translation, copy/download text, run accuracy evaluation |
+
+---
+
+## Setup & Installation
+
+### Prerequisites
+
+| Tool | Minimum Version |
+|---|---|
+| Python | 3.9+ |
+| Node.js | 18+ |
+| npm | 9+ |
+| FFmpeg | any (optional — needed only if YouTube transcript unavailable) |
+
+### 1. Clone the repository
+
+```bash
+git clone <repo-url>
+cd VideoTranslatorAI
+```
+
+### 2. Backend setup
+
 ```powershell
-cd c:\Users\thega\Downloads\videoTranslation
+cd backend
+
+# Create and activate virtual environment (recommended)
+python -m venv .venv
+.venv\Scripts\activate       # Windows
+# source .venv/bin/activate  # macOS/Linux
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-### Step 2: Backend Setup (FastAPI)
+> **First run** downloads `google/mt5-small` (~1.2 GB) from HuggingFace automatically.
+> Model is cached locally — all subsequent starts are offline and instant.
 
-1. **Navigate to backend directory:**
-   ```powershell
-   cd backend
-   ```
+### 3. Frontend setup
 
-2. **Create and activate virtual environment:**
-   ```powershell
-   python -m venv venv
-   .\venv\Scripts\Activate.ps1
-   ```
+```powershell
+cd frontend
+npm install
+```
 
-3. **Install Python dependencies:**
-   ```powershell
-   pip install -r requirements.txt
-   ```
+### 4. Environment variables
 
-4. **Start the FastAPI server:**
-   ```powershell
-   python main.py
-   ```
+No API keys are required. The `.env.example` in `backend/` confirms this:
 
-   The backend API will be available at: `http://localhost:8000`
-   
-   You can verify it's working by visiting: `http://localhost:8000/docs` (FastAPI auto-generated documentation)
+```
+# No external API keys required.
+# Translation runs fully locally using google/mt5-small.
+```
 
-### Step 3: Frontend Setup (React)
+---
 
-Open a **new terminal/command prompt** and:
+## Running the Application
 
-1. **Navigate to frontend directory:**
-   ```powershell
-   cd c:\Users\thega\Downloads\videoTranslation\frontend
-   ```
+### Start the Backend
 
-2. **Install Node.js dependencies:**
-   ```powershell
-   npm install
-   ```
+```powershell
+cd backend
+python main.py
+```
 
-3. **Start the React development server:**
-   ```powershell
-   npm run dev
-   ```
+Expected startup output:
+```
+Loading Whisper base model...
+Whisper model loaded successfully!
+Loading mT5 translation model (google/mt5-small)...
+mT5 model loaded successfully! Running on CPU.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
 
-   The frontend will be available at: `http://localhost:5173`
+### Start the Frontend
 
-## Usage
+```powershell
+cd frontend
+npm run dev
+```
 
-1. **Start both servers** (backend and frontend) as described above
-2. **Open your browser** and go to `http://localhost:5173`
-3. **Enter a video URL** (e.g., YouTube link) in the input field
-4. **Click "Transcribe Video"** and wait for processing
-5. **View the transcription** result and copy it if needed
+Expected output:
+```
+VITE v5.x  ready in 3000ms
+➜  Local:   http://localhost:5173/
+```
 
-## API Endpoints
+### Access the Application
 
-### Backend API (FastAPI - Port 8000)
+| Service | URL |
+|---|---|
+| Frontend (UI) | http://localhost:5173 |
+| Backend API | http://localhost:8000 |
+| API Docs (Swagger) | http://localhost:8000/docs |
+| API Docs (ReDoc) | http://localhost:8000/redoc |
 
-- **GET /** - Health check endpoint
-- **POST /api/transcribe/** - Transcribe video from URL
-  - Body: `{"video_url": "https://youtube.com/watch?v=..."}`
-  - Response: `{"transcription": "...", "status": "success"}`
+---
 
-## Troubleshooting
+## Accuracy Evaluation
 
-### Common Issues
+The app includes a built-in accuracy evaluator available on the Results screen.
 
-1. **FFmpeg not found error:**
-   - Ensure FFmpeg is installed and added to system PATH
-   - Restart terminal after installation
+### Metrics Calculated
 
-2. **CORS errors:**
-   - Make sure backend is running on port 8000
-   - Check that frontend is accessing `http://localhost:8000`
+| Metric | Description |
+|---|---|
+| **WER** | Word Error Rate — industry standard for transcription quality |
+| **Character Accuracy** | Levenshtein similarity at character level |
+| **Word Accuracy** | `100 - WER%` |
+| **Overall Accuracy** | `Character × 0.6 + Word × 0.4` (weighted) |
 
-3. **Port conflicts:**
-   - Backend default: 8000 (change in `main.py`)
-   - Frontend default: 5173 (change in `vite.config.js`)
+### Test Scripts
 
-4. **Python virtual environment issues:**
-   - On Windows, you might need to enable script execution: 
-     ```powershell
-     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-     ```
+```powershell
+# Test translation endpoint (server must be running)
+python backend/test_translation.py
 
-5. **Video download failures:**
-   - Some videos may be restricted or require authentication
-   - Try with different video URLs (YouTube public videos work best)
+# Run accuracy evaluation suite
+python backend/test_accuracy.py
+```
 
-### Performance Notes
+---
 
-- First transcription may take longer as Whisper downloads the model
-- Processing time depends on video length
-- Whisper "base" model is used for balance of speed/accuracy
+## Supported Languages
 
-## Development
+The following language codes are accepted for `source_language` and `target_language`:
 
-### Backend Development
+| Code | Language | Code | Language |
+|---|---|---|---|
+| `en` | English | `hi` | Hindi |
+| `te` | Telugu | `ta` | Tamil |
+| `kn` | Kannada | `ml` | Malayalam |
+| `bn` | Bengali | `gu` | Gujarati |
+| `mr` | Marathi | `pa` | Punjabi |
+| `or` | Odia | `as` | Assamese |
+| `ne` | Nepali | `ur` | Urdu |
+| `zh` | Chinese | `ja` | Japanese |
+| `ko` | Korean | `ar` | Arabic |
+| `fr` | French | `de` | German |
+| `es` | Spanish | `pt` | Portuguese |
+| `ru` | Russian | `it` | Italian |
+| `tr` | Turkish | `nl` | Dutch |
 
-- FastAPI with automatic OpenAPI documentation
-- CORS enabled for frontend communication
-- Temporary file cleanup for audio processing
-- Error handling and validation
+> mT5-small supports 101 languages. Translation quality is best for high-resource languages (English, French, German, Spanish). For low-resource languages (Telugu, Kannada, etc.), results are functional but may be imperfect — mT5-small is a general-purpose model, not a dedicated translation model.
 
-### Frontend Development
+---
 
-- React with Vite for fast development
-- Modern CSS with gradients and animations
-- Responsive design for mobile devices
-- Loading states and error handling
+## Performance Notes
 
-### Extending the Application
+| Operation | Typical Time (CPU) |
+|---|---|
+| Whisper transcription (1 min audio) | 30–90 seconds |
+| mT5 translation (short text) | 5–15 seconds |
+| mT5 translation (long text, chunked) | 15–60 seconds |
+| YouTube transcript fetch (fast path) | < 2 seconds |
 
-**Add more transcription options:**
-- Different Whisper model sizes (`tiny`, `small`, `medium`, `large`)
-- Language detection and specific language transcription
-- Timestamp information in transcriptions
+**Tips to improve speed:**
+- Use YouTube URLs when possible — the transcript fast-path skips audio download and Whisper entirely
+- Keep source text under 400 characters per chunk for optimal mT5 performance
+- Run on a machine with more CPU cores or use GPU by changing `.to('cpu')` → `.to('cuda')` in `main.py`
 
-**Improve UI/UX:**
-- File upload support for local videos
-- Progress bars for transcription
-- History of previous transcriptions
-
-**Add features:**
-- User authentication
-- Save transcriptions to database
-- Export to different formats (SRT, VTT, etc.)
-
-## Dependencies
-
-### Backend (Python)
-- `fastapi` - Web framework
-- `uvicorn` - ASGI server
-- `yt-dlp` - Video/audio downloader
-- `openai-whisper` - AI transcription model
-- `pydantic` - Data validation
-
-### Frontend (Node.js)
-- `react` - UI framework  
-- `vite` - Build tool and dev server
-- Standard React development tools
+---
 
 ## License
 
-This project is for educational/personal use. Please respect video content copyrights and platform terms of service when using this tool.
+MIT

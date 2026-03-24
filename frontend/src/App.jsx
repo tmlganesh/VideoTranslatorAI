@@ -11,9 +11,7 @@ function App() {
   const [currentStep, setCurrentStep] = useState(1);
 
   // Form data
-  const [uploadMethod, setUploadMethod] = useState('url'); // 'url' or 'file'
   const [videoUrl, setVideoUrl] = useState('');
-  const [selectedFile, setSelectedFile] = useState(null);
 
   // Results
   const [transcriptionResult, setTranscriptionResult] = useState(null);
@@ -40,9 +38,7 @@ function App() {
 
   const startOver = () => {
     setCurrentStep(1);
-    setUploadMethod('url');
     setVideoUrl('');
-    setSelectedFile(null);
     setTranscriptionResult(null);
     setTranslationResult(null);
     setTargetLanguageUsed(null);
@@ -58,31 +54,18 @@ function App() {
     setError(null);
 
     try {
-      let response;
-
-      if (uploadMethod === 'url') {
-        // Transcribe from URL
-        response = await fetch('http://localhost:8000/api/transcribe/', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            video_url: videoUrl,
-            target_language: targetLanguage && targetLanguage !== 'Same as Original (No Translation)' ? targetLanguage : null,
-            source_language: sourceLanguage && sourceLanguage !== 'Auto-detect' ? sourceLanguage : null
-          }),
-        });
-      } else {
-        // Transcribe uploaded file
-        const formData = new FormData();
-        formData.append('file', selectedFile);
-
-        response = await fetch('http://localhost:8000/api/transcribe-file/', {
-          method: 'POST',
-          body: formData,
-        });
-      }
+      // Transcribe from URL
+      const response = await fetch('http://localhost:8000/api/transcribe/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          video_url: videoUrl,
+          target_language: targetLanguage && targetLanguage !== 'Same as Original (No Translation)' ? targetLanguage : null,
+          source_language: sourceLanguage && sourceLanguage !== 'Auto-detect' ? sourceLanguage : null
+        }),
+      });
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -130,12 +113,8 @@ function App() {
       case 2:
         return (
           <UploadScreen
-            uploadMethod={uploadMethod}
-            setUploadMethod={setUploadMethod}
             videoUrl={videoUrl}
             setVideoUrl={setVideoUrl}
-            selectedFile={selectedFile}
-            setSelectedFile={setSelectedFile}
             onNext={nextStep}
             onPrev={prevStep}
           />
