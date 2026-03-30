@@ -10,12 +10,8 @@ const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage,
   const [isCalculating, setIsCalculating] = useState(false);
   const [showAccuracySection, setShowAccuracySection] = useState(false);
 
-  // Use actual transcription data or fallback (avoid using placeholder when empty/whitespace)
-  const actualTranscription = (transcriptionResult && transcriptionResult.trim() !== "") ? transcriptionResult : `There was an idea stark knows this called the Avengers Initiative. The idea was to bring together a group of remarkable people, see if they could become something more.
-
-See if they could work together when we needed them to, to fight the battles that we never could. Phil Coulson died still believing in that idea, in heroes.
-
-Well, it's an old fashioned notion. But I think it's time we give it a try. We need a response team. These people are dangerous.`;
+  // Use actual transcription data — NO hardcoded fallback
+  const actualTranscription = (transcriptionResult && transcriptionResult.trim() !== "") ? transcriptionResult : null;
 
   // Use real translation result — non-empty string means we have a translation
   const actualTranslation = translationResult && translationResult.trim() !== "" ? translationResult : null;
@@ -33,8 +29,21 @@ Well, it's an old fashioned notion. But I think it's time we give it a try. We n
       'mr': 'Marathi',
       'bn': 'Bengali',
       'or': 'Odia',
+      'od': 'Odia',
       'pa': 'Punjabi',
-      'as': 'Assamese'
+      'as': 'Assamese',
+      'ne': 'Nepali',
+      'es': 'Spanish',
+      'fr': 'French',
+      'de': 'German',
+      'it': 'Italian',
+      'pt': 'Portuguese',
+      'ru': 'Russian',
+      'ja': 'Japanese',
+      'ko': 'Korean',
+      'zh': 'Chinese',
+      'ar': 'Arabic',
+      'tr': 'Turkish'
     };
     return langMap[langCode] || langCode;
   };
@@ -777,15 +786,22 @@ Well, it's an old fashioned notion. But I think it's time we give it a try. We n
               </div>
             </div>
             <div style={metaStyle}>
-              {detectedLanguage?.name || 'Detected Language'} • {actualTranscription.split(' ').length} words • Auto-generated
+              {detectedLanguage?.name || 'Detected Language'} • {actualTranscription ? actualTranscription.split(' ').length : 0} words • Auto-generated
             </div>
             <div style={textContentStyle}>
-              {transcriptionLines.map((line, index) => (
-                <div key={index} style={textLineStyle}>
-                  <span style={timestampStyle}>{line.timestamp}</span>
-                  <span>{line.text}</span>
+              {actualTranscription ? (
+                transcriptionLines.map((line, index) => (
+                  <div key={index} style={textLineStyle}>
+                    <span style={timestampStyle}>{line.timestamp}</span>
+                    <span>{line.text}</span>
+                  </div>
+                ))
+              ) : (
+                <div style={textLineStyle}>
+                  <span style={{ ...timestampStyle, color: '#9ca3af' }}>--:--:--</span>
+                  <span style={{ color: '#9ca3af', fontStyle: 'italic' }}>No transcription data available.</span>
                 </div>
-              ))}
+              )}
             </div>
           </div>
 
@@ -836,19 +852,19 @@ Well, it's an old fashioned notion. But I think it's time we give it a try. We n
         <div style={actionsStyle}>
           <button
             style={primaryButtonStyle}
-            onClick={() => handleDownload(sampleTranscription, 'transcription.txt')}
+            onClick={() => handleDownload(actualTranslation || actualTranscription || '', 'transcription.txt')}
           >
             📥 Download TXT
           </button>
           <button
             style={secondaryButtonStyle}
-            onClick={() => handleDownload(sampleTranscription, 'transcription.docx')}
+            onClick={() => handleDownload(actualTranslation || actualTranscription || '', 'transcription.docx')}
           >
             📄 Download DOCX
           </button>
           <button
             style={tertiaryButtonStyle}
-            onClick={() => handleDownload(sampleTranscription, 'transcription.srt')}
+            onClick={() => handleDownload(actualTranscription || '', 'transcription.srt')}
           >
             � Download SRT
           </button>

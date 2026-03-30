@@ -252,18 +252,34 @@ def get_youtube_transcript(video_id, source_language=None):
                 pass
         
         if transcript:
-            # Format transcript text
-            formatter = TextFormatter()
-            transcript_text = formatter.format_transcript(transcript)
+            # Build transcript text preserving sentence boundaries
+            # Each snippet from the YouTube API is a caption segment
+            segments = []
+            for snippet in transcript:
+                text_part = snippet.text if hasattr(snippet, 'text') else str(snippet)
+                text_part = text_part.strip()
+                if text_part:
+                    segments.append(text_part)
             
-            # Clean up the transcript text
-            transcript_text = transcript_text.replace('\n', ' ').strip()
+            if segments:
+                # Join with sentence-preserving separator (period + space)
+                # so _split_into_chunks can split on sentence boundaries
+                transcript_text = '. '.join(segments)
+                # Clean up double periods / extra whitespace
+                transcript_text = re.sub(r'\.\s*\.', '.', transcript_text)
+                transcript_text = re.sub(r'\s+', ' ', transcript_text).strip()
+            else:
+                # Fallback to formatter if segment extraction failed
+                formatter = TextFormatter()
+                transcript_text = formatter.format_transcript(transcript)
+                transcript_text = re.sub(r'\s+', ' ', transcript_text).strip()
             
             # Get language name
             detected_language_name = language_names.get(selected_lang, selected_lang.upper())
             
             print(f"YouTube transcript found: {detected_language_name} ({selected_lang})")
             print(f"Transcript length: {len(transcript_text)} characters")
+            print(f"Segments count: {len(segments)}")
             
             return transcript_text, selected_lang, detected_language_name
         
@@ -306,14 +322,16 @@ def improve_telugu_transcription(text, language_code):
     
     return text.strip()
 
-def _split_into_chunks(text: str, max_chunk_chars: int = 400) -> list:
+def _split_into_chunks(text: str, max_chunk_chars: int = 200) -> list:
     """
     Split text into sentence-level chunks that stay within max_chunk_chars.
-    Marian models work best with individual sentences or short paragraphs.
+    Marian models work best with individual sentences or very short paragraphs.
+    Smaller chunks (200 chars) produce significantly better translations.
     """
     if len(text) <= max_chunk_chars:
         return [text]
 
+    # Split on sentence-ending punctuation (English, Hindi/Devanagari, pipes, newlines)
     sentences = re.split(r'(?<=[.!?|।\n])\s*', text)
     text_chunks = []
     current_chunk = ""
@@ -327,8 +345,27 @@ def _split_into_chunks(text: str, max_chunk_chars: int = 400) -> list:
             if current_chunk:
                 text_chunks.append(current_chunk.strip())
             if len(sentence) > max_chunk_chars:
-                for i in range(0, len(sentence), max_chunk_chars):
-                    text_chunks.append(sentence[i:i + max_chunk_chars])
+                # For very long sentences, split on commas or clause boundaries
+                sub_parts = re.split(r'(?<=[,;:])\s*', sentence)
+                sub_chunk = ""
+                for part in sub_parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+                    if len(sub_chunk) + len(part) + 1 <= max_chunk_chars:
+                        sub_chunk += part + " "
+                    else:
+                        if sub_chunk:
+                            text_chunks.append(sub_chunk.strip())
+                        # If a single part is still too long, hard-split it
+                        if len(part) > max_chunk_chars:
+                            for i in range(0, len(part), max_chunk_chars):
+                                text_chunks.append(part[i:i + max_chunk_chars])
+                            sub_chunk = ""
+                        else:
+                            sub_chunk = part + " "
+                if sub_chunk:
+                    text_chunks.append(sub_chunk.strip())
                 current_chunk = ""
             else:
                 current_chunk = sentence + " "
@@ -374,8 +411,33 @@ def _translate_direct(text: str, source_lang: str, target_lang: str) -> str:
                 early_stopping=True
             )
         decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        translated_chunks.append(decoded)
-        print(f"  Chunk {i+1}/{len(text_chunks)}: {decoded[:80]}")
+
+        # Quality validation: detect degenerate translations
+        decoded_clean = decoded.strip()
+        chunk_clean = chunk.strip()
+        is_valid = True
+
+        # Check 1: translation is empty
+        if not decoded_clean:
+            print(f"  WARNING: Chunk {i+1} produced empty translation, keeping source")
+            is_valid = False
+
+        # Check 2: translation identical to source (model copied input)
+        if is_valid and decoded_clean == chunk_clean:
+            print(f"  WARNING: Chunk {i+1} translation identical to source, keeping as-is")
+            # Still use it — might be proper nouns or numbers
+
+        # Check 3: detect excessive repetition (degenerate output)
+        if is_valid and len(decoded_clean) > 20:
+            words = decoded_clean.split()
+            if len(words) > 4:
+                unique_ratio = len(set(words)) / len(words)
+                if unique_ratio < 0.15:  # Less than 15% unique words = likely degenerate
+                    print(f"  WARNING: Chunk {i+1} has degenerate repetition (unique ratio: {unique_ratio:.2f}), keeping source")
+                    is_valid = False
+
+        translated_chunks.append(decoded_clean if is_valid else chunk_clean)
+        print(f"  Chunk {i+1}/{len(text_chunks)}: {(decoded_clean if is_valid else chunk_clean)[:80]}")
 
     translation_time = time.time() - translation_start
     print(f"  Direct translation completed in {translation_time:.2f}s")
