@@ -1,9 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Tuple
 import yt_dlp
-import whisper
 import os
 import tempfile
 import uvicorn
@@ -13,13 +12,45 @@ import re
 import json
 import time
 import torch
-from transformers import MarianMTModel, MarianTokenizer
+from urllib.parse import urlparse, parse_qs
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, MarianMTModel, MarianTokenizer
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ENABLE_MT5_EN_TE_ROUTING = _env_bool("ENABLE_MT5_EN_TE_ROUTING", False)
+MT5_EN_TE_MODEL_PATH = os.getenv("MT5_EN_TE_MODEL_PATH", "google/mt5-small")
+MT5_MAX_SOURCE_TOKENS = int(os.getenv("MT5_MAX_SOURCE_TOKENS", "256"))
+MT5_MAX_TARGET_TOKENS = int(os.getenv("MT5_MAX_TARGET_TOKENS", "256"))
+
+# Product requirement: only these 11 Indian languages are user-selectable targets.
+INDIAN_11_LANGUAGE_CODES = {
+    "hi",  # Hindi
+    "te",  # Telugu
+    "ta",  # Tamil
+    "kn",  # Kannada
+    "ml",  # Malayalam
+    "gu",  # Gujarati
+    "mr",  # Marathi
+    "bn",  # Bengali
+    "od",  # Odia
+    "pa",  # Punjabi
+    "as",  # Assamese
+}
+
+# Backend still needs English for internal pivot translation and EN↔TE route.
+SUPPORTED_ROUTING_LANG_CODES = INDIAN_11_LANGUAGE_CODES | {"en"}
 
 def setup_ffmpeg_path():
     """Find and setup FFmpeg path"""
@@ -50,13 +81,23 @@ def setup_ffmpeg_path():
 # Setup FFmpeg on module import
 FFMPEG_PATH = setup_ffmpeg_path()
 
-# Load Whisper model once at startup
-print("Loading Whisper base model...")
-model = whisper.load_model("base")  # Smaller, faster model for development
-print("Whisper model loaded successfully!")
+# Whisper is loaded lazily to avoid blocking API startup when only YouTube transcripts are needed.
+whisper_model = None
+
+
+def get_whisper_model():
+    """Load Whisper model on first use (audio fallback path only)."""
+    global whisper_model
+    if whisper_model is None:
+        print("Loading Whisper base model on-demand...")
+        import whisper
+        whisper_model = whisper.load_model("base")
+        print("Whisper model loaded successfully!")
+    return whisper_model
 
 # Cache for Helsinki-NLP opus-mt translation models (loaded on-demand)
 _translation_model_cache = {}
+_mt5_en_te_model_cache: Optional[Tuple[AutoTokenizer, AutoModelForSeq2SeqLM, str]] = None
 
 # Helsinki-NLP opus-mt language code mapping
 # Maps (source_lang, target_lang) → model name
@@ -166,13 +207,113 @@ def get_translation_model(source_lang: str, target_lang: str):
 
 print("Helsinki-NLP opus-mt translation models will be loaded on-demand (first use).")
 
+
+def is_en_te_pair(source_lang: str, target_lang: str) -> bool:
+    return {source_lang, target_lang} == {"en", "te"}
+
+
+def get_mt5_en_te_model():
+    """
+    Load (or retrieve from cache) the fine-tuned mT5 checkpoint for EN↔TE.
+    If no local checkpoint is configured, defaults to google/mt5-small.
+    """
+    global _mt5_en_te_model_cache
+
+    if _mt5_en_te_model_cache is None:
+        print(f"Loading mT5 EN↔TE model: {MT5_EN_TE_MODEL_PATH}")
+        tokenizer = AutoTokenizer.from_pretrained(MT5_EN_TE_MODEL_PATH)
+        model = AutoModelForSeq2SeqLM.from_pretrained(MT5_EN_TE_MODEL_PATH)
+        model.eval()
+        _mt5_en_te_model_cache = (tokenizer, model, MT5_EN_TE_MODEL_PATH)
+        print("mT5 EN↔TE model loaded successfully!")
+
+    return _mt5_en_te_model_cache
+
+
+def normalize_language_code(lang_code: Optional[str]) -> Optional[str]:
+    """
+    Normalize language codes to the format expected by translation models.
+    Examples: en-US -> en, pt-BR -> pt, or -> od.
+    """
+    if not lang_code:
+        return None
+
+    code = str(lang_code).strip().lower().replace('_', '-')
+    if not code:
+        return None
+
+    # Reduce regional variants to base language code.
+    code = code.split('-')[0]
+
+    # Project-specific canonical aliases.
+    aliases = {
+        'or': 'od',  # Odia is represented as 'od' in this project
+    }
+    return aliases.get(code, code)
+
+
+def validate_target_language_for_ui(target_lang: Optional[str]) -> None:
+    """Allow only Indian-11 target languages when user explicitly requests translation."""
+    if not target_lang:
+        return
+
+    if target_lang not in INDIAN_11_LANGUAGE_CODES:
+        allowed = ", ".join(sorted(INDIAN_11_LANGUAGE_CODES))
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported target language '{target_lang}'. "
+                f"Only Indian 11 languages are supported: {allowed}."
+            ),
+        )
+
+
+def validate_language_codes_for_translation(source_lang: str, target_lang: str) -> None:
+    """Validate direct /api/translate language codes against supported routing set."""
+    if source_lang not in SUPPORTED_ROUTING_LANG_CODES:
+        allowed = ", ".join(sorted(SUPPORTED_ROUTING_LANG_CODES))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported source language '{source_lang}'. Allowed: {allowed}.",
+        )
+
+    if target_lang not in SUPPORTED_ROUTING_LANG_CODES:
+        allowed = ", ".join(sorted(SUPPORTED_ROUTING_LANG_CODES))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported target language '{target_lang}'. Allowed: {allowed}.",
+        )
+
 def extract_youtube_video_id(url):
     """Extract YouTube video ID from various YouTube URL formats."""
+    if not url:
+        return None
+
+    try:
+        parsed = urlparse(url if '://' in url else f"https://{url}")
+        host = (parsed.netloc or '').lower()
+        path = (parsed.path or '').strip('/')
+
+        if host.endswith('youtu.be'):
+            return path.split('/')[0] if path else None
+
+        if 'youtube.com' in host:
+            if path == 'watch':
+                return parse_qs(parsed.query).get('v', [None])[0]
+            if path.startswith('shorts/'):
+                return path.split('/')[1] if len(path.split('/')) > 1 else None
+            if path.startswith('embed/') or path.startswith('v/'):
+                parts = path.split('/')
+                return parts[1] if len(parts) > 1 else None
+    except Exception as e:
+        print(f"URL parse failed, trying regex fallback: {e}")
+
+    # Fallback regex for uncommon YouTube URL variants.
     youtube_regex = re.compile(
-        r'(?:https?://)?' # protocol
-        r'(?:www\.)?' # www
-        r'(?:youtube\.com/(?:watch\?v=|embed/|v/)|youtu\.be/)' # domain and path
-        r'([^&\n?#]+)' # video ID
+        r'(?:https?://)?'
+        r'(?:www\.)?'
+        r'(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/)|youtu\.be/)'
+        r'([^&\n?#/]+)'
     )
     match = youtube_regex.search(url)
     return match.group(1) if match else None
@@ -208,12 +349,16 @@ def get_youtube_transcript(video_id, source_language=None):
             lang_code_map = {
                 'English': 'en', 'Hindi': 'hi', 'Telugu': 'te', 'Tamil': 'ta',
                 'Kannada': 'kn', 'Malayalam': 'ml', 'Bengali': 'bn', 'Gujarati': 'gu',
-                'Marathi': 'mr', 'Spanish': 'es', 'French': 'fr', 'German': 'de'
+                'Marathi': 'mr', 'Punjabi': 'pa', 'Assamese': 'as', 'Odia': 'or',
+                # Accept lower-case code-style values as well.
+                'en': 'en', 'hi': 'hi', 'te': 'te', 'ta': 'ta', 'kn': 'kn',
+                'ml': 'ml', 'bn': 'bn', 'gu': 'gu', 'mr': 'mr', 'pa': 'pa',
+                'as': 'as', 'od': 'or',
             }
             preferred_lang = lang_code_map.get(source_language, source_language.lower()[:2])
             try:
                 transcript = transcript_list.find_transcript([preferred_lang]).fetch()
-                selected_lang = preferred_lang
+                selected_lang = normalize_language_code(preferred_lang)
                 print(f"Found transcript in user-specified language: {source_language}")
             except:
                 print(f"No transcript found for specified language: {source_language}")
@@ -224,7 +369,7 @@ def get_youtube_transcript(video_id, source_language=None):
                 for t in transcript_list:
                     if t.is_generated:
                         transcript = t.fetch()
-                        selected_lang = t.language_code
+                        selected_lang = normalize_language_code(t.language_code)
                         print(f"Found auto-generated transcript in original language: {selected_lang}")
                         break
             except Exception as e:
@@ -245,7 +390,7 @@ def get_youtube_transcript(video_id, source_language=None):
                 for t in transcript_list:
                     if not t.is_generated:
                         transcript = t.fetch()
-                        selected_lang = t.language_code
+                        selected_lang = normalize_language_code(t.language_code)
                         print(f"Found manual transcript in: {selected_lang}")
                         break
             except:
@@ -444,6 +589,52 @@ def _translate_direct(text: str, source_lang: str, target_lang: str) -> str:
     return ' '.join(translated_chunks)
 
 
+def _translate_mt5_en_te(text: str, source_lang: str, target_lang: str) -> str:
+    """
+    Translate EN↔TE using a fine-tuned mT5 checkpoint.
+    Input prompt format: "translate <source> to <target>: <text>"
+    """
+    tokenizer, mt5_model, model_path = get_mt5_en_te_model()
+    text_chunks = _split_into_chunks(text, max_chunk_chars=180)
+    translated_chunks = []
+
+    print(f"=== mT5 EN↔TE TRANSLATION ===")
+    print(f"Source: {source_lang} -> Target: {target_lang}")
+    print(f"Model: {model_path}")
+    print(f"Chunk count: {len(text_chunks)}")
+
+    translation_start = time.time()
+    for i, chunk in enumerate(text_chunks):
+        prompt = f"translate {source_lang} to {target_lang}: {chunk}"
+        inputs = tokenizer(
+            [prompt],
+            return_tensors="pt",
+            max_length=MT5_MAX_SOURCE_TOKENS,
+            truncation=True,
+            padding=True,
+        )
+
+        with torch.no_grad():
+            outputs = mt5_model.generate(
+                **inputs,
+                max_length=MT5_MAX_TARGET_TOKENS,
+                num_beams=5,
+                no_repeat_ngram_size=2,
+                early_stopping=True,
+            )
+
+        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+        if not decoded:
+            decoded = chunk
+
+        translated_chunks.append(decoded)
+        print(f"  mT5 chunk {i+1}/{len(text_chunks)}: {decoded[:80]}")
+
+    elapsed = time.time() - translation_start
+    print(f"mT5 translation completed in {elapsed:.2f}s")
+    return " ".join(translated_chunks)
+
+
 def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     """
     Translate text using Helsinki-NLP/opus-mt models (purpose-built for translation).
@@ -489,6 +680,27 @@ def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     except Exception as e:
         print(f"opus-mt translation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
+
+
+def translate_text_with_router(text: str, source_lang: str, target_lang: str) -> str:
+    """
+    Routing policy:
+    - EN↔TE uses mT5 (fine-tuned checkpoint path configurable)
+    - All other language pairs use Marian/opus-mt
+    - Marian keeps existing direct and pivot-via-English behavior
+    """
+    if source_lang == target_lang:
+        return text
+
+    if ENABLE_MT5_EN_TE_ROUTING and is_en_te_pair(source_lang, target_lang):
+        # Prevent base mt5 from outputting <extra_id_0> tokens without giving actual translation.
+        if MT5_EN_TE_MODEL_PATH == "google/mt5-small" or not os.path.exists(MT5_EN_TE_MODEL_PATH):
+            print(f"WARNING: mT5 routing enabled, but model path '{MT5_EN_TE_MODEL_PATH}' is a base model or not found.")
+            print("Falling back to Helsinki-NLP/opus-mt models to ensure translation works.")
+        else:
+            return _translate_mt5_en_te(text=text, source_lang=source_lang, target_lang=target_lang)
+
+    return translate_text(text=text, source_lang=source_lang, target_lang=target_lang)
 
 def try_api_video_transcription(video_url, api_key=None):
     """
@@ -614,16 +826,20 @@ async def transcribe_video(request: TranscriptionRequest):
                 
                 # Determine if translation is needed
                 # Auto-translate to English if source is non-English and no target specified
-                effective_target = request.target_language
+                effective_target = normalize_language_code(request.target_language)
                 if (not effective_target or effective_target == "Same as Original (No Translation)") and lang_code != 'en':
                     effective_target = 'en'  # Auto-translate non-English to English
                     print(f"Auto-translating from {lang_code} to English (no target specified)")
+
+                # Enforce UI requirement: explicit targets must be one of Indian 11 languages.
+                if request.target_language:
+                    validate_target_language_for_ui(effective_target)
                 
                 if effective_target and effective_target != "Same as Original (No Translation)" and effective_target != lang_code:
                     try:
                         print(f"Starting opus-mt translation from {lang_code} to {effective_target}")
                         print(f"Transcript text (first 200 chars): {transcript_text[:200]}...")
-                        translation_text = translate_text(
+                        translation_text = translate_text_with_router(
                             text=transcript_text,
                             source_lang=lang_code,
                             target_lang=effective_target
@@ -640,7 +856,7 @@ async def transcribe_video(request: TranscriptionRequest):
                             language_code=lang_code,
                             status=f"error_translation_failed: {str(e)}",
                             translation="",
-                            target_language=""
+                            target_language=effective_target or normalize_language_code(request.target_language) or ""
                         )
                 
                 return TranscriptionResponse(
@@ -689,12 +905,7 @@ async def transcribe_video(request: TranscriptionRequest):
         print("Loading audio for language detection...")
         
         try:
-            # Load audio and detect language
-            audio = whisper.load_audio(audio_file_path)
-            print(f"Audio loaded, shape: {audio.shape if hasattr(audio, 'shape') else 'unknown'}")
-            
-            audio = whisper.pad_or_trim(audio)
-            print(f"Audio after padding/trimming, shape: {audio.shape if hasattr(audio, 'shape') else 'unknown'}")
+            model = get_whisper_model()
             
             # Transcribe with automatic language detection — log latency
             transcribe_start = time.time()
@@ -707,6 +918,7 @@ async def transcribe_video(request: TranscriptionRequest):
         except Exception as lang_detect_error:
             print(f"Language detection failed: {lang_detect_error}")
             print("Falling back to direct transcription without language detection...")
+            model = get_whisper_model()
             
             # Fallback: direct transcription
             transcribe_start = time.time()
@@ -726,6 +938,7 @@ async def transcribe_video(request: TranscriptionRequest):
             'no': 'Norwegian', 'or': 'Odia', 'as': 'Assamese', 'ne': 'Nepali', 'si': 'Sinhala'
         }
         
+        detected_language_code = normalize_language_code(detected_language_code) or 'en'
         detected_language_name = language_names.get(detected_language_code, detected_language_code.upper())
         
         print(f"Detected language: {detected_language_name} ({detected_language_code})")
@@ -742,14 +955,18 @@ async def transcribe_video(request: TranscriptionRequest):
         
         # Determine if translation is needed
         # Auto-translate to English if source is non-English and no target specified
-        effective_target = request.target_language
+        effective_target = normalize_language_code(request.target_language)
         if (not effective_target or effective_target == "Same as Original (No Translation)") and detected_language_code != 'en':
             effective_target = 'en'  # Auto-translate non-English to English
             print(f"Auto-translating from {detected_language_code} to English (no target specified)")
+
+        # Enforce UI requirement: explicit targets must be one of Indian 11 languages.
+        if request.target_language:
+            validate_target_language_for_ui(effective_target)
         
         if effective_target and effective_target != "Same as Original (No Translation)" and effective_target != detected_language_code:
             try:
-                translation_text = translate_text(
+                translation_text = translate_text_with_router(
                     text=transcription_text,
                     source_lang=detected_language_code,
                     target_lang=effective_target
@@ -766,7 +983,7 @@ async def transcribe_video(request: TranscriptionRequest):
                     language_code=detected_language_code,
                     status=f"error_translation_failed: {str(e)}",
                     translation="",
-                    target_language=""
+                    target_language=effective_target or normalize_language_code(request.target_language) or ""
                 )
         
         # Clean up temporary directory
@@ -793,21 +1010,29 @@ async def transcribe_video(request: TranscriptionRequest):
 @app.post("/api/translate/", response_model=TranslationResponse)
 async def translate_endpoint(request: TranslationRequest):
     """
-    Translate text using local Helsinki-NLP/opus-mt models.
-    Fully offline — no external API calls. Supports all major languages.
+    Hybrid local translation pipeline:
+    - EN↔TE uses mT5 (fine-tuned checkpoint if configured)
+    - All other pairs use Helsinki-NLP/opus-mt Marian models
+    Fully offline — no external API calls.
     """
     try:
-        print(f"Translation request: {request.source_language} -> {request.target_language}")
+        source_lang = normalize_language_code(request.source_language)
+        target_lang = normalize_language_code(request.target_language)
+        print(f"Translation request: {source_lang} -> {target_lang}")
         print(f"Text to translate: {request.text[:100]}...")
 
         if not request.text.strip():
             raise HTTPException(status_code=400, detail="Text to translate cannot be empty")
 
-        # Local mT5 translation (synchronous, CPU-only)
-        translated_text = translate_text(
+        if not source_lang or not target_lang:
+            raise HTTPException(status_code=400, detail="Both source_language and target_language are required")
+
+        validate_language_codes_for_translation(source_lang, target_lang)
+
+        translated_text = translate_text_with_router(
             text=request.text,
-            source_lang=request.source_language,
-            target_lang=request.target_language
+            source_lang=source_lang,
+            target_lang=target_lang
         )
 
         print(f"Translation completed: {translated_text[:100]}...")
@@ -815,8 +1040,8 @@ async def translate_endpoint(request: TranslationRequest):
         return TranslationResponse(
             original_text=request.text,
             translated_text=translated_text,
-            source_language=request.source_language,
-            target_language=request.target_language,
+            source_language=source_lang,
+            target_language=target_lang,
             status="success"
         )
 

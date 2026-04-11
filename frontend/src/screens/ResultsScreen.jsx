@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { generateAccuracyReport, getAccuracyColor } from '../utils/accuracyCalculator';
+import { apiUrl } from '../utils/api';
 
-const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage, detectedLanguage, onNewTranscription }) => {
+const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage, detectedLanguage, transcriptionStatus, onNewTranscription }) => {
   const [originalText, setOriginalText] = useState('');
   const [accuracyReport, setAccuracyReport] = useState(null);
   const [backendAccuracy, setBackendAccuracy] = useState(null);
@@ -15,6 +16,13 @@ const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage,
 
   // Use real translation result — non-empty string means we have a translation
   const actualTranslation = translationResult && translationResult.trim() !== "" ? translationResult : null;
+
+  const translationErrorMatch = typeof transcriptionStatus === 'string'
+    ? transcriptionStatus.match(/^error_translation_failed:\s*(.*)$/i)
+    : null;
+  const translationErrorDetail = translationErrorMatch && translationErrorMatch[1]
+    ? translationErrorMatch[1]
+    : null;
 
   // Language name mapping for display
   const getLanguageName = (langCode) => {
@@ -31,19 +39,7 @@ const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage,
       'or': 'Odia',
       'od': 'Odia',
       'pa': 'Punjabi',
-      'as': 'Assamese',
-      'ne': 'Nepali',
-      'es': 'Spanish',
-      'fr': 'French',
-      'de': 'German',
-      'it': 'Italian',
-      'pt': 'Portuguese',
-      'ru': 'Russian',
-      'ja': 'Japanese',
-      'ko': 'Korean',
-      'zh': 'Chinese',
-      'ar': 'Arabic',
-      'tr': 'Turkish'
+      'as': 'Assamese'
     };
     return langMap[langCode] || langCode;
   };
@@ -133,7 +129,7 @@ const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage,
       }
 
       // 2. Backend Calculation (Authoritative)
-      const res = await fetch('http://localhost:8000/api/evaluate-accuracy/', {
+      const res = await fetch(apiUrl('/api/evaluate-accuracy/'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reference_text: originalText, predicted_text: targetText })
@@ -830,7 +826,9 @@ const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage,
               {actualTranslation
                 ? `${getLanguageName(detectedLanguage?.code || 'te')} → ${getLanguageName(targetLanguage || 'en')} • Translated from ${detectedLanguage?.name || 'Auto-detected'}`
                 : targetLanguage
-                  ? `Translation to ${getLanguageName(targetLanguage)} was requested but not returned — check backend logs`
+                  ? (translationErrorDetail
+                    ? `Translation to ${getLanguageName(targetLanguage)} failed: ${translationErrorDetail}`
+                    : `Translation to ${getLanguageName(targetLanguage)} was requested but not returned`)
                   : 'No translation language selected'}
             </div>
             <div style={textContentStyle}>
@@ -842,7 +840,13 @@ const ResultsScreen = ({ transcriptionResult, translationResult, targetLanguage,
               ) : (
                 <div style={textLineStyle}>
                   <span style={{ ...timestampStyle, color: '#9ca3af' }}>--:--:--</span>
-                  <span style={{ color: '#9ca3af', fontStyle: 'italic' }}>No translation was requested for this transcription.</span>
+                  <span style={{ color: '#9ca3af', fontStyle: 'italic' }}>
+                    {targetLanguage
+                      ? (translationErrorDetail
+                        ? `Translation failed: ${translationErrorDetail}`
+                        : 'Translation was requested but no output was returned.')
+                      : 'No translation was requested for this transcription.'}
+                  </span>
                 </div>
               )}
             </div>

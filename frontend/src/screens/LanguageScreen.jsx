@@ -115,18 +115,17 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
             onChange={(e) => setSourceLanguage(e.target.value)}
           >
             <option value="Auto-detect">Auto-detect</option>
-            <option value="English">English</option>
-            <option value="Spanish">Spanish</option>
-            <option value="French">French</option>
-            <option value="German">German</option>
-            <option value="Italian">Italian</option>
-            <option value="Portuguese">Portuguese</option>
-            <option value="Russian">Russian</option>
-            <option value="Japanese">Japanese</option>
-            <option value="Korean">Korean</option>
-            <option value="Chinese">Chinese</option>
             <option value="Hindi">Hindi</option>
             <option value="Telugu">Telugu</option>
+            <option value="Tamil">Tamil</option>
+            <option value="Kannada">Kannada</option>
+            <option value="Malayalam">Malayalam</option>
+            <option value="Gujarati">Gujarati</option>
+            <option value="Marathi">Marathi</option>
+            <option value="Bengali">Bengali</option>
+            <option value="Odia">Odia</option>
+            <option value="Punjabi">Punjabi</option>
+            <option value="Assamese">Assamese</option>
           </select>
         </div>
 
@@ -140,7 +139,6 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
             onChange={(e) => setTargetLanguage(e.target.value)}
           >
             <option value="Same as Original (No Translation)">Same as Original (No Translation)</option>
-            <option value="en">English</option>
             <option value="hi">Hindi</option>
             <option value="te">Telugu</option>
             <option value="ta">Tamil</option>
@@ -152,18 +150,6 @@ const LanguageScreen = ({ onNext, onPrev, onStartTranscription }) => {
             <option value="od">Odia</option>
             <option value="pa">Punjabi</option>
             <option value="as">Assamese</option>
-            <option value="ne">Nepali</option>
-            <option value="es">Spanish</option>
-            <option value="fr">French</option>
-            <option value="de">German</option>
-            <option value="it">Italian</option>
-            <option value="pt">Portuguese</option>
-            <option value="ru">Russian</option>
-            <option value="ja">Japanese</option>
-            <option value="ko">Korean</option>
-            <option value="zh">Chinese</option>
-            <option value="ar">Arabic</option>
-            <option value="tr">Turkish</option>
           </select>
         </div>
 

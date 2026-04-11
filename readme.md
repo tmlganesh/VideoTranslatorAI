@@ -18,6 +18,7 @@
 10. [Accuracy Evaluation](#accuracy-evaluation)
 11. [Supported Languages](#supported-languages)
 12. [Performance Notes](#performance-notes)
+13. [Model Architecture & Fine-Tuning Notes](#model-architecture--fine-tuning-notes)
 
 ---
 
@@ -29,6 +30,12 @@ VideoTranslatorAI is a full-stack web application that:
 - **Transcribes** speech to text using OpenAI Whisper (auto language detection)
 - **Translates** the transcription using Google's mT5 multilingual model — **no internet required after first model download**
 - Displays results in a clean, step-by-step React UI with copy, download, and accuracy evaluation features
+
+### Model Architecture & Fine-Tuning Notes
+
+For complete documentation of Whisper architecture, mT5 architecture (general), fine-tuning guidance, and the exact model/data behavior currently implemented in this repository, see:
+
+- [MODEL_ARCHITECTURE_AND_FINE_TUNING.md](MODEL_ARCHITECTURE_AND_FINE_TUNING.md)
 
 ---
 

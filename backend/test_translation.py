@@ -1,5 +1,10 @@
 """
-Test the local Helsinki-NLP/opus-mt translation endpoint.
+Test the local hybrid translation endpoint.
+
+Routing:
+- en<->te: mT5 route
+- all other pairs: Marian/opus-mt route (with English pivot if needed)
+
 Make sure the backend server is running before executing this script:
     python main.py
 

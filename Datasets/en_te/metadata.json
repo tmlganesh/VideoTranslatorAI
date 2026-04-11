@@ -1,0 +1,25 @@
+{
+  "requested_target_pairs": 200000,
+  "effective_target_pairs": 68090,
+  "final_pairs": 68090,
+  "composition": {
+    "samanantar_ratio": 0.7,
+    "opensubs_ratio": 0.3,
+    "samanantar_rows": 47663,
+    "opensubs_rows": 20427
+  },
+  "filters": {
+    "max_tokens": 128,
+    "lowercase": false,
+    "spoken_priority": true
+  },
+  "splits": {
+    "train": 66728,
+    "validation": 681,
+    "test": 681
+  },
+  "datasets": {
+    "primary": "ai4bharat/samanantar:te",
+    "secondary": "OPUS-OpenSubtitles-direct:multi-archive"
+  }
+}
